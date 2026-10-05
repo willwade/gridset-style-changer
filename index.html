@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Gridset Style Changer</title>
+  <meta name="robots" content="noindex">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%231d5fd6'/%3E%3Ctext x='16' y='22' font-family='sans-serif' font-size='16' font-weight='bold' fill='white' text-anchor='middle'%3EAa%3C/text%3E%3C/svg%3E">
+  <link rel="stylesheet" href="css/style.css">
+  <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+</head>
+<body>
+  <header>
+    <h1>Gridset Style Changer</h1>
+    <p class="tagline">Fix common access issues in a Grid 3 gridset — bigger text, higher contrast. Everything runs in your browser; files never leave your device.</p>
+  </header>
+
+  <main>
+    <section id="upload-section">
+      <div id="drop-zone" tabindex="0" role="button" aria-label="Upload gridset file">
+        <div class="dz-icon" aria-hidden="true">&#128193;</div>
+        <p><strong>Drop a .gridset file here</strong> or click to choose</p>
+        <input type="file" id="file-input" accept=".gridset" hidden>
+      </div>
+      <p id="upload-error" class="error" hidden></p>
+    </section>
+
+    <section id="editor-section" hidden>
+      <div class="summary" id="gridset-summary"></div>
+
+      <div class="quick-fixes">
+        <h2>Common fixes</h2>
+        <div class="fix-row">
+          <div class="fix-card fix-primary">
+            <h3>1 &middot; Increase font size</h3>
+            <p class="hint">Grows text in every style. Styles that never set a size get base&nbsp;+&nbsp;delta.</p>
+            <div class="fix-controls">
+              <label>Delta <input type="number" id="bump-delta" value="10" step="1"></label>
+              <label>Base <input type="number" id="bump-base" value="16" min="1" step="1"></label>
+            </div>
+            <button class="btn btn-primary" data-action="bump-size">Apply</button>
+          </div>
+
+          <div class="fix-card fix-primary">
+            <h3>2 &middot; Make higher contrast</h3>
+            <p class="hint">Boosts the contrast between text and cell background to your target ratio. Styles already meeting it are untouched.</p>
+            <div class="fix-controls">
+              <label>Mode
+                <select id="contrast-mode">
+                  <option value="auto" selected>Adjust text colour (keeps look)</option>
+                  <option value="bw">Black text on white cells</option>
+                  <option value="wb">White text on black cells</option>
+                </select>
+              </label>
+              <label>Target
+                <select id="contrast-target">
+                  <option value="4.5" selected>4.5:1 (WCAG AA)</option>
+                  <option value="7">7:1 (WCAG AAA)</option>
+                </select>
+              </label>
+            </div>
+            <button class="btn btn-primary" data-action="fix-contrast">Apply</button>
+          </div>
+
+          <div class="fix-card">
+            <h3>Set font size everywhere</h3>
+            <p class="hint">Every style gets exactly this size, including styles that never set one.</p>
+            <div class="fix-controls">
+              <label>Size <input type="number" id="set-size-value" value="24" min="1" step="1"></label>
+            </div>
+            <button class="btn" data-action="set-size">Apply</button>
+          </div>
+
+          <div class="fix-card">
+            <h3>Change font family</h3>
+            <p class="hint">Replaces the font in every style that sets one, and adds it to the rest.</p>
+            <div class="fix-controls">
+              <label>Font <input type="text" id="font-family-value" list="font-suggestions" value="Arial"></label>
+              <datalist id="font-suggestions">
+                <option>Arial</option><option>Verdana</option><option>Tahoma</option>
+                <option>Times New Roman</option><option>Georgia</option><option>Comic Sans MS</option>
+                <option>Trebuchet MS</option><option>Calibri</option>
+              </datalist>
+            </div>
+            <button class="btn" data-action="set-font">Apply</button>
+          </div>
+        </div>
+        <label class="scope-toggle">
+          <input type="checkbox" id="include-inline" checked>
+          Also apply to inline cell styles inside grids (recommended)
+        </label>
+        <p id="fix-result" class="fix-result" hidden></p>
+      </div>
+
+      <div class="styles-header">
+        <h2>Named styles <span id="style-count" class="count-badge"></span></h2>
+        <div class="download-area">
+          <span id="change-count" class="change-count">No changes yet</span>
+          <button class="btn btn-primary" id="download-btn" disabled>Download modified gridset</button>
+        </div>
+        <div id="verify-status"></div>
+      </div>
+      <p class="cards-hint">Badges flag low contrast and missing font size. Edit any style directly below.</p>
+      <div id="style-cards" class="cards"></div>
+
+      <details class="grids-details">
+        <summary>Grids &amp; inline styles</summary>
+        <div id="grid-list"></div>
+      </details>
+    </section>
+  </main>
+
+  <footer>
+    <p>AACTools · Gridset Style Changer · Not affiliated with Smartbox. Always test edited gridsets in Grid 3 before distributing.</p>
+  </footer>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
