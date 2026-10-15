@@ -12,15 +12,15 @@
 <body>
   <header>
     <h1>Gridset Style Changer</h1>
-    <p class="tagline">Fix common access issues in a Grid 3 gridset — bigger text, higher contrast. Everything runs in your browser; files never leave your device.</p>
+    <p class="tagline">Fix common access issues in Grid 3 gridsets — bigger text, higher contrast. Everything runs in your browser; files never leave your device.</p>
   </header>
 
   <main>
     <section id="upload-section">
       <div id="drop-zone" tabindex="0" role="button" aria-label="Upload gridset file">
         <div class="dz-icon" aria-hidden="true">&#128193;</div>
-        <p><strong>Drop a .gridset file here</strong> or click to choose</p>
-        <input type="file" id="file-input" accept=".gridset" hidden>
+        <p><strong>Drop a .gridset or .grid3user file here</strong> or click to choose</p>
+        <input type="file" id="file-input" accept=".gridset,.grid3user" hidden>
       </div>
       <p id="upload-error" class="error" hidden></p>
     </section>
@@ -29,7 +29,7 @@
       <div class="summary" id="gridset-summary"></div>
 
       <div class="quick-fixes">
-        <h2>Common fixes</h2>
+        <h2>Common fixes - apply throughout</h2>
         <div class="fix-row">
           <div class="fix-card fix-primary">
             <h3>1 &middot; Increase font size</h3>
@@ -43,7 +43,7 @@
 
           <div class="fix-card fix-primary">
             <h3>2 &middot; Make higher contrast</h3>
-            <p class="hint">Boosts the contrast between text and cell background to your target ratio. Styles already meeting it are untouched.</p>
+            <p class="hint">Uses inherited styles and grid background colours. Transparent cells over unknown or image backgrounds get an opaque background so contrast can be checked.</p>
             <div class="fix-controls">
               <label>Mode
                 <select id="contrast-mode">
@@ -62,29 +62,16 @@
             <button class="btn btn-primary" data-action="fix-contrast">Apply</button>
           </div>
 
-          <div class="fix-card">
-            <h3>Set font size everywhere</h3>
-            <p class="hint">Every style gets exactly this size, including styles that never set one.</p>
-            <div class="fix-controls">
-              <label>Size <input type="number" id="set-size-value" value="24" min="1" step="1"></label>
-            </div>
-            <button class="btn" data-action="set-size">Apply</button>
-          </div>
-
-          <div class="fix-card">
-            <h3>Change font family</h3>
-            <p class="hint">Replaces the font in every style that sets one, and adds it to the rest.</p>
-            <div class="fix-controls">
-              <label>Font <input type="text" id="font-family-value" list="font-suggestions" value="Arial"></label>
-              <datalist id="font-suggestions">
-                <option>Arial</option><option>Verdana</option><option>Tahoma</option>
-                <option>Times New Roman</option><option>Georgia</option><option>Comic Sans MS</option>
-                <option>Trebuchet MS</option><option>Calibri</option>
-              </datalist>
-            </div>
-            <button class="btn" data-action="set-font">Apply</button>
-          </div>
+          <div id="common-style"></div>
         </div>
+        <section id="user-gridsets" class="user-gridsets" hidden>
+          <p class="hint"><b>The fixes and common style tile above affect all gridsets chosen below:</b></p>
+          <div id="gridset-targets" class="gridset-targets"></div>
+        </section>
+        <label class="scope-toggle">
+          <input type="checkbox" id="include-default" checked>
+          Also apply to the Default style (used by cells without a named style; adds it if missing)
+        </label>
         <label class="scope-toggle">
           <input type="checkbox" id="include-inline" checked>
           Also apply to inline cell styles inside grids (recommended)
@@ -96,11 +83,17 @@
         <h2>Named styles <span id="style-count" class="count-badge"></span></h2>
         <div class="download-area">
           <span id="change-count" class="change-count">No changes yet</span>
-          <button class="btn btn-primary" id="download-btn" disabled>Download modified gridset</button>
+          <button class="btn btn-primary" id="download-btn" disabled>Download modified file</button>
         </div>
         <div id="verify-status"></div>
       </div>
-      <p class="cards-hint">Badges flag low contrast and missing font size. Edit any style directly below.</p>
+      <div id="gridset-editor-section" hidden>
+        <label class="gridset-editor-label">Edit gridset
+          <select id="gridset-editor"></select>
+        </label>
+        <p class="cards-hint">Named-style changes below affect only this gridset, independently of the common-fix checkboxes above.</p>
+      </div>
+      <p class="cards-hint">Badges flag low contrast and missing font size. Click a swatch to choose a colour; the percentage sets transparency (0% opaque, 100% transparent). Previews may depend on the grid background.</p>
       <div id="style-cards" class="cards"></div>
 
       <details class="grids-details">
@@ -114,6 +107,15 @@
     <p>AACTools · Gridset Style Changer · Not affiliated with Smartbox. Always test edited gridsets in Grid 3 before distributing.</p>
   </footer>
 
-  <script type="module" src="js/app.js"></script>
+  <script type="module">
+    try {
+      await import('./js/app.js');
+    } catch (error) {
+      const message = document.getElementById('upload-error');
+      message.textContent = 'Could not load the editor or its dependencies. Check your connection and reload.';
+      message.hidden = false;
+      console.error('Could not load the editor:', error);
+    }
+  </script>
 </body>
 </html>
