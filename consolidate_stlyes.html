@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="robots" content="noindex">
+  <title>Consolidate Gridset Styles</title>
+  <link rel="stylesheet" href="css/style.css">
+  <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+</head>
+<body>
+  <header>
+    <h1>Consolidate Gridset Styles</h1>
+    <p class="tagline">An optional step before changing styles. Review each decision without deliberately changing current appearance. Files stay on your device.</p>
+  </header>
+  <main class="consolidation">
+    <p><a href="index.html">Style changer</a> &middot; <a href="STYLE_CONSOLIDATION.md">Workflow and safety notes</a></p>
+    <section id="upload-section" aria-busy="true">
+      <div class="summary">
+        <h2>Make future style edits more consistent</h2>
+        <p>Keep meaningful roles separate, restore inheritance where appropriate, and replace repeated local formatting with named variants. Nothing is selected automatically.</p>
+        <p><strong>Same appearance does not mean same purpose.</strong> Removing an override changes what follows future base edits. Merging styles links their future edits. Optional empty/covered-cell cleanup changes stored properties and requires visibility review. Always test the result in Grid 3.</p>
+      </div>
+      <div id="drop-zone" tabindex="0" role="button" aria-label="Choose a gridset or user file to consolidate">
+        <div class="dz-icon" aria-hidden="true">&#128193;</div>
+        <p><strong>Drop a .gridset or .grid3user file here</strong> or click to choose</p>
+        <input type="file" id="file-input" accept=".gridset,.grid3user" hidden>
+      </div>
+    </section>
+    <p id="consolidation-error" class="error" role="alert" hidden></p>
+    <p id="consolidation-status" role="status" aria-live="polite"></p>
+    <section id="wizard" hidden>
+      <div class="summary">
+        <strong id="file-name"></strong>
+        <label class="gridset-editor-label">Review gridset
+          <select id="context-picker"></select>
+        </label>
+        <p class="cards-hint">Decisions affect only this gridset. Other gridsets and user settings are preserved. Review each gridset separately; download includes them all.</p>
+        <div id="stats" class="consolidation-stats"></div>
+        <div class="wizard-actions">
+          <button class="btn" id="undo" disabled>Undo last application</button>
+          <button class="btn" id="restart">Start again with another file</button>
+        </div>
+      </div>
+      <nav aria-label="Consolidation steps"><ol id="steps" class="wizard-steps"></ol></nav>
+      <section class="summary">
+        <h2 id="step-title" tabindex="-1"></h2>
+        <p id="step-description"></p>
+        <p id="step-warning" class="consolidation-warning"></p>
+        <div id="step-content"></div>
+        <div class="wizard-actions">
+          <button class="btn btn-primary" id="apply" disabled>Apply selected changes</button>
+          <button class="btn" id="back">Back</button>
+          <button class="btn btn-primary" id="next">Next / skip</button>
+        </div>
+      </section>
+      <details class="summary">
+        <summary>Decisions applied in this session <span id="decision-count"></span></summary>
+        <ol id="decision-log"></ol>
+      </details>
+      <section id="export-section" class="summary" hidden>
+        <h2>Save, then optionally change appearance</h2>
+        <p>Export checks every cell's effective properties against the original baseline, allowing only the exact property changes approved for empty/covered cells, and checks non-style grid content. Structural validation is additional, not proof of appearance in Grid 3.</p>
+        <button class="btn btn-primary" id="download">Verify and download consolidated file</button>
+        <div id="export-status" role="status" aria-live="polite"></div>
+        <p>After downloading, <a href="index.html" target="_blank" rel="noopener">open the style changer</a> and upload the consolidated file to adjust colours, fonts or sizes. No file is transferred automatically between pages.</p>
+      </section>
+    </section>
+  </main>
+  <footer><p>AACTools &middot; Gridset Style Changer &middot; Not affiliated with Smartbox. Always test edited gridsets in Grid 3 before distributing.</p></footer>
+  <script type="module">
+    try {
+      await import('./js/consolidate-app.js');
+    } catch (error) {
+      const box = document.getElementById('consolidation-error');
+      box.textContent = 'Could not load consolidation or its dependencies. Check your connection and reload.';
+      box.hidden = false;
+      console.error('Could not load consolidation:', error);
+    }
+  </script>
+</body>
+</html>

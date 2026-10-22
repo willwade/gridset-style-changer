@@ -22,6 +22,23 @@ Upload a `.gridset` or a `.grid3user` file, then:
 
 Everything runs client-side. Files never leave the browser.
 
+## Optional style consolidation
+
+Before editing appearance, open [the guided style consolidator](consolidate_stlyes.html).
+It walks through an inventory, restoring redundant inheritance, naming repeated
+variants, explicitly approved equivalent-style merges, protected pruning, and
+verified export. No changes are selected automatically. Session undo is available.
+Review each gridset in a user file independently; export retains the others.
+
+The wizard preserves stored effective cell properties, not every future editing
+relationship: restoring inheritance removes pins, and merging couples future edits.
+Step 2 also offers separately approved cleanup of text overrides on static empty
+cells and local overrides on potentially covered cells. These change effective
+properties, require visibility review, and are tracked precisely by verification.
+It does not infer semantic roles or automatically harmonise similar colours/fonts.
+Download the result, then upload it in the existing editor for deliberate visual
+changes. See [the workflow, examples and AAC Tools migration boundary](STYLE_CONSOLIDATION.md).
+
 Each colour control is one line: a swatch picker and transparency percentage (0–100%).
 Hover over the percentage input for an explanation, or the swatch for the stored colour.
 Selecting a colour closes the matrix. Swatches show RGB independently of transparency
@@ -52,6 +69,10 @@ With a local static server running, open [the colour regression tests](tests/col
 They check the real AAC-processors colour converters, alpha round-trips, compositing,
 measured contrast targets, the colour matrix and transparency controls, high-contrast
 edits to named and inline styles, and exported XML.
+
+Also open [the consolidation regression tests](tests/consolidation.html) for
+analysis, atomic transformations, inheritance, protected styles, preservation,
+and standalone/nested/exploded archive round-trips.
 
 ## How it works
 

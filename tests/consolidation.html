@@ -1,0 +1,494 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Consolidation regression tests</title></head>
+<body>
+  <h1>Consolidation regression tests</h1>
+  <pre id="results">Running...</pre>
+  <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+  <script type="module">
+    import { openStyleFile, buildModifiedBlob, buildModifiedUserBlob } from '../js/archives.js';
+    import {
+      analyseStyles, applyConsolidation, captureStyleBaseline, verifyStyleBaseline,
+    } from '../js/consolidation.js';
+
+    const output = document.getElementById('results');
+    const passed = [];
+    const assert = (value, message) => { if (!value) throw new Error(message); };
+    function equal(actual, expected, message) {
+      assert(JSON.stringify(actual) === JSON.stringify(expected),
+        `${message}: expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`);
+    }
+    function throws(run, fragment) {
+      let error;
+      try { run(); } catch (caught) { error = caught; }
+      assert(error && error.message.includes(fragment), `Expected error containing "${fragment}", got ${error?.message}`);
+    }
+    async function test(name, run) {
+      await run();
+      passed.push(name);
+      output.textContent = passed.map((name) => `PASS ${name}`).join('\n');
+    }
+    const named = (key, props = '') => `<Style Key="${key}">${props}</Style>`;
+    const cell = (props = '<BasedOnStyle>A</BasedOnStyle>', x = 0) =>
+      `<Cell X="${x}" Y="0"><Content><Caption>Keep me</Caption><Style>${props}</Style><Commands><Command ID="Speak"/></Commands></Content></Cell>`;
+    async function fixture({
+      styles = named('Default', '<FontName>ThemeFont</FontName><FontSize>24</FontSize>') +
+        named('A', '<Name>Role A</Name><TileColour>#11223380</TileColour>'),
+      cells = cell() + cell('<BasedOnStyle>A</BasedOnStyle>', 1), extraXml = null,
+    } = {}) {
+      const zip = new JSZip();
+      zip.file('Settings0/Styles/styles.xml', `<StyleData><Styles>${styles}</Styles></StyleData>`);
+      zip.file('Grids/Main/grid.xml', `<Grid><GridGuid>original-guid</GridGuid><BackgroundImage>keep.png</BackgroundImage><Cells>${cells}</Cells></Grid>`);
+      zip.file('Settings0/settings.xml', '<GridSetSettings><StartGrid>Main</StartGrid></GridSetSettings>');
+      zip.file('FileMap.xml', '<FileMap/>');
+      zip.file('Grids/Main/keep.png', new Uint8Array([1, 2, 3, 255]));
+      zip.file('untouched.bin', new Uint8Array([9, 8, 7]));
+      if (extraXml) zip.file('Other.xml', extraXml);
+      const bytes = await zip.generateAsync({ type: 'uint8array' });
+      const file = new File([bytes], 'fixture.gridset');
+      return { file, context: (await openStyleFile(file, true)).contexts[0] };
+    }
+    try {
+      await test('Inventory distinguishes references, override cells and individual assignments', async () => {
+        const { context } = await fixture({ cells: cell() + cell('<BasedOnStyle>A</BasedOnStyle><FontSize>24</FontSize><TileColour>#11223380</TileColour>', 1) });
+        const a = analyseStyles(context);
+        equal(a.stats, { grids: 1, cells: 2, named: 2, inline: 2, overrideCells: 1, assignments: 2, redundantAssignments: 2, unreferenced: 0 }, 'Stats');
+        equal(a.styles.find((s) => s.key === 'A').references, 2, 'References');
+      });
+      await test('Restore is atomic and preserves transparent colours and symbolic fonts', async () => {
+        const { context } = await fixture({ cells: cell('<BasedOnStyle>A</BasedOnStyle><FontName>ThemeFont</FontName><TileColour>#11223380</TileColour>') });
+        const baseline = captureStyleBaseline(context);
+        const entry = analyseStyles(context).redundant[0];
+        const next = applyConsolidation(context, [{ type: 'restore', id: entry.id }]);
+        equal(context.gridDocs.values().next().value.querySelector('Style').children.length, 3, 'Original untouched');
+        equal(next.gridDocs.values().next().value.querySelector('Style').children.length, 1, 'Only reference remains');
+        verifyStyleBaseline(next, baseline);
+        equal(analyseStyles(next).redundant.length, 0, 'Second restore has no suggestions');
+      });
+      await test('Missing values are not filled from library presets or compared to similar colours', async () => {
+        const { context } = await fixture({ styles: named('Default') + named('A', '<TileColour>#11223380</TileColour>'),
+          cells: cell('<BasedOnStyle>A</BasedOnStyle><FontSize>16</FontSize><TileColour>#11223480</TileColour>') });
+        equal(analyseStyles(context).redundant.length, 0, 'Unset and near-colour are not equal');
+      });
+      await test('Static empty cells offer only differing text overrides, including Default-based cells', async () => {
+        const empty = '<Cell><Content><CaptionAndImage/><Commands/><Style><BasedOnStyle>Default</BasedOnStyle>' +
+          '<FontSize>99</FontSize><FontName>Unused font</FontName><FontColour>#FF0000FF</FontColour>' +
+          '<BackColour>#123456FF</BackColour><BorderColour>#111111FF</BorderColour></Style></Content></Cell>';
+        const { context } = await fixture({ cells: empty });
+        const baseline = captureStyleBaseline(context);
+        const entry = analyseStyles(context).irrelevant[0];
+        equal(entry.reason, 'empty-text', 'Empty review group');
+        equal(Object.keys(entry.props), ['FontSize', 'FontName', 'FontColour'], 'Only text properties');
+        throws(() => applyConsolidation(context, [{ type: 'irrelevant', id: entry.id }]), 'acknowledgement');
+        const next = applyConsolidation(context, [{ type: 'irrelevant', id: entry.id, confirm: true }]);
+        const style = next.gridDocs.values().next().value.querySelector('Style');
+        assert(style.querySelector('BackColour') && style.querySelector('BorderColour'), 'Visible decoration retained');
+        assert(!style.querySelector('FontSize'), 'Local text formatting removed');
+        verifyStyleBaseline(next, baseline);
+        throws(() => verifyStyleBaseline(next, baseline, new Map()), 'effective cell properties changed');
+        const reopened = (await openStyleFile(new File([await buildModifiedBlob(next)], 'clean.gridset'), true)).contexts[0];
+        verifyStyleBaseline(reopened, baseline, next.styleApprovals);
+        reopened.gridDocs.values().next().value.querySelector('BackColour').textContent = '#FFFFFFFF';
+        throws(() => verifyStyleBaseline(reopened, baseline, next.styleApprovals), 'effective cell properties changed');
+        equal(analyseStyles(next).irrelevant.length, 0, 'Text cleanup does not recur');
+        equal(context.styleApprovals, undefined, 'Original approval state unchanged');
+      });
+      await test('Dynamic, labelled, image, command and unknown content is never classified as static empty', async () => {
+        for (const content of [
+          '<ContentType>Workspace</ContentType>', '<ContentType>AutoContent</ContentType>',
+          '<ContentType>LiveCell</ContentType>', '<ContentSubType>Prediction</ContentSubType>',
+          '<CaptionAndImage><Caption><p><s><r>Hello</r></s></p></Caption></CaptionAndImage>',
+          '<CaptionAndImage><Image>picture.png</Image></CaptionAndImage>',
+          '<Commands><Command ID="Speak"/></Commands>', '<UnknownContent/>',
+          '<Parameters><Parameter Key="showincelllabel">Yes</Parameter></Parameters>',
+        ]) {
+          const { context } = await fixture({ cells: `<Cell><Content>${content}<Style><BasedOnStyle>Default</BasedOnStyle><FontSize>99</FontSize></Style></Content></Cell>` });
+          equal(analyseStyles(context).irrelevant.length, 0, `Excluded ${content}`);
+        }
+      });
+      await test('Coverage requires full rectangle containment, not partial overlap or duplicate origins', async () => {
+        const style = '<Content><Caption>Visible if uncovered</Caption><Style><BasedOnStyle>Default</BasedOnStyle><FontSize>99</FontSize><TileColour>#FF0000FF</TileColour></Style></Content>';
+        const { context } = await fixture({ cells:
+          `<Cell ColumnSpan="3" RowSpan="2">${style}</Cell>` +
+          `<Cell X="1" Y="1">${style}</Cell>` +
+          `<Cell X="2" ColumnSpan="2">${style}</Cell>` +
+          `<Cell>${style}</Cell>` + `<Cell X="-1">${style}</Cell>` });
+        const entries = analyseStyles(context).irrelevant;
+        equal(entries.length, 1, 'One geometric group');
+        equal(entries[0].items.length, 1, 'Only fully contained different-origin cell');
+        equal(entries[0].reason, 'covered', 'Coverage flagged as potential, not proven');
+        const baseline = captureStyleBaseline(context);
+        const next = applyConsolidation(context, [{ type: 'irrelevant', id: entries[0].id, confirm: true }]);
+        verifyStyleBaseline(next, baseline);
+        const styles = next.gridDocs.values().next().value.querySelectorAll('Style');
+        equal(styles[1].children.length, 1, 'Covered local properties removed, base retained');
+        assert(styles[0].querySelector('TileColour') && styles[2].querySelector('TileColour'), 'Covering and partially overlapped cells untouched');
+        styles[1].appendChild(next.gridDocs.values().next().value.createElement('FontSize')).textContent = '88';
+        throws(() => verifyStyleBaseline(next, baseline), 'effective cell properties changed');
+      });
+      await test('Exact restoration and empty cleanup can be approved in one batch', async () => {
+        const { context } = await fixture({ cells: '<Cell><Content><Style><BasedOnStyle>Default</BasedOnStyle><FontSize>24</FontSize><FontColour>#FF0000FF</FontColour></Style></Content></Cell>' });
+        const analysis = analyseStyles(context);
+        const next = applyConsolidation(context, [
+          { type: 'restore', id: analysis.redundant[0].id },
+          { type: 'irrelevant', id: analysis.irrelevant[0].id, confirm: true },
+        ]);
+        equal(analyseStyles(next).stats.assignments, 0, 'Both distinct groups applied');
+        verifyStyleBaseline(next, captureStyleBaseline(context));
+      });
+      await test('Repeated variants become independent named styles without freezing inherited Default values', async () => {
+        const props = '<BasedOnStyle>A</BasedOnStyle><FontSize>32</FontSize>';
+        const { context } = await fixture({ cells: cell(props) + cell(props, 1) + cell(undefined, 2) });
+        const entry = analyseStyles(context).variants[0];
+        const next = applyConsolidation(context, [{ type: 'variant', id: entry.id, name: 'Role A - large' }]);
+        const a = analyseStyles(next);
+        equal(a.stats.named, 3, 'One new named style');
+        equal(a.stats.overrideCells, 0, 'No local overrides');
+        const created = next.stylesDoc.querySelector('[Key="Consolidated 1"]');
+        assert(created && !created.querySelector('BasedOnStyle'), 'No new inheritance chain');
+        assert(!created.querySelector('FontName'), 'Default ThemeFont remains inherited');
+        equal(created.querySelector('TileColour').textContent, '#11223380', 'Distinct tile/alpha preserved');
+        equal(analyseStyles(next).variants.length, 0, 'Promoted groups do not recur');
+        equal(context.stylesDoc.querySelectorAll('Style').length, 2, 'Original definitions unchanged');
+      });
+      await test('Variant names must be meaningful and non-colliding', async () => {
+        const props = '<BasedOnStyle>A</BasedOnStyle><FontSize>32</FontSize>';
+        const { context } = await fixture({ cells: cell(props) + cell(props, 1) });
+        const id = analyseStyles(context).variants[0].id;
+        throws(() => applyConsolidation(context, [{ type: 'variant', id, name: ' ' }]), 'meaningful');
+        throws(() => applyConsolidation(context, [{ type: 'variant', id, name: 'Role A' }]), 'already exists');
+      });
+      await test('Explicit base chains resolve and flatten without introducing chains', async () => {
+        const props = '<BasedOnStyle>B</BasedOnStyle><FontSize>32</FontSize>';
+        const { context } = await fixture({
+          styles: named('Default', '<FontName>ThemeFont</FontName>') + named('A', '<BackColour>#FF000000</BackColour>') +
+            named('B', '<BasedOnStyle>A</BasedOnStyle><Alignment>1</Alignment>'),
+          cells: cell(props) + cell(props, 1),
+        });
+        const entry = analyseStyles(context).variants[0];
+        const next = applyConsolidation(context, [{ type: 'variant', id: entry.id, name: 'B large' }]);
+        const created = next.stylesDoc.querySelector('[Key="Consolidated 1"]');
+        equal(created.querySelector('BackColour').textContent, '#FF000000', 'Explicit ancestor flattened');
+        equal(created.querySelector('Alignment').textContent, '1', 'Alignment preserved');
+        assert(!created.querySelector('FontName'), 'Implicit Default still inherited');
+      });
+      await test('Equivalent named merges retarget references and preserve unknown scalar fields', async () => {
+        const props = '<TileColour>#11223380</TileColour><CustomFutureProperty>keep</CustomFutureProperty>';
+        const { context } = await fixture({ styles: named('Default') + named('A', '<Name>Role A</Name>' + props) +
+          named('B', '<Name>Role B</Name>' + props), cells: cell() + cell('<BasedOnStyle>B</BasedOnStyle>', 1) });
+        const group = analyseStyles(context).duplicates[0];
+        const next = applyConsolidation(context, [{ type: 'merge', id: group.id, target: 'A' }]);
+        equal(analyseStyles(next).stats.named, 2, 'Removed duplicate');
+        assert(!next.stylesDoc.querySelector('[Key="B"]'), 'B removed');
+        equal(analyseStyles(next).styles.find((s) => s.key === 'A').references, 2, 'Both references rewritten');
+        equal(analyseStyles(next).duplicates.length, 0, 'Merge does not recur');
+      });
+      await test('Default must be retained when equivalent copied styles are merged', async () => {
+        const { context } = await fixture({ styles: named('Default', '<FontName>ThemeFont</FontName>') +
+          named('A', '<Name>Default copy</Name>') });
+        const id = analyseStyles(context).duplicates[0].id;
+        throws(() => applyConsolidation(context, [{ type: 'merge', id, target: 'A' }]), 'Default must');
+        const next = applyConsolidation(context, [{ type: 'merge', id, target: 'Default' }]);
+        equal(analyseStyles(next).stats.named, 1, 'Copy merged into Default');
+      });
+      await test('Protected conventions and opaque key mentions are never offered for pruning', async () => {
+        const { context } = await fixture({ styles: named('Default') + named('A') + named('Unused') +
+          named('Workspace') + named('Chat category style') + named('Mentioned'),
+          extraXml: '<Other><Target>Mentioned</Target></Other>' });
+        const a = analyseStyles(context);
+        equal(a.unused.filter((s) => !s.protected).map((s) => s.key), ['Unused'], 'Only plain unused key');
+        throws(() => applyConsolidation(context, [{ type: 'prune', key: 'Workspace' }]), 'protected');
+        throws(() => applyConsolidation(context, [{ type: 'prune', key: 'Mentioned' }]), 'protected');
+        const next = applyConsolidation(context, [{ type: 'prune', key: 'Unused' }]);
+        assert(!next.stylesDoc.querySelector('[Key="Unused"]'), 'Unused removed');
+      });
+      await test('Style references in other XML protect definitions', async () => {
+        const { context } = await fixture({ styles: named('Default') + named('A') + named('External'),
+          extraXml: '<Other><BasedOnStyle>External</BasedOnStyle></Other>' });
+        const external = analyseStyles(context).styles.find((s) => s.key === 'External');
+        assert(external.protected && external.references === 1, 'External reference indexed and protected');
+      });
+      await test('Missing references, cycles, duplicate keys and structured properties block changes', async () => {
+        for (const styles of [
+          named('Default') + named('A', '<BasedOnStyle>Missing</BasedOnStyle>'),
+          named('Default') + named('A', '<BasedOnStyle>B</BasedOnStyle>') + named('B', '<BasedOnStyle>A</BasedOnStyle>'),
+          named('Default') + named('A') + named('A'),
+          named('Default') + named('A', '<Future><Nested/></Future>'),
+          named('Default') + named('A', '<FontSize>12</FontSize><FontSize>14</FontSize>'),
+          named('Default') + named('A', '<Future mode="special">value</Future>'),
+          named('Default') + named('A', 'unsupported text<FontSize>12</FontSize>'),
+          named('Default') + named('A', '<foreign:FontSize xmlns:foreign="urn:unknown">12</foreign:FontSize>'),
+        ]) {
+          const { context } = await fixture({ styles });
+          assert(analyseStyles(context).issues.length > 0, 'Unsafe input reported');
+          throws(() => captureStyleBaseline(context), analyseStyles(context).issues[0]);
+        }
+        const { context } = await fixture();
+        const grid = context.gridDocs.values().next().value;
+        grid.documentElement.appendChild(grid.createElement('Style'));
+        assert(analyseStyles(context).issues.some((issue) => issue.includes('unsupported Style location')),
+          'Non-cell Style is not treated as a cell override');
+      });
+      await test('An invalid later action rolls back the entire batch', async () => {
+        const { context } = await fixture({ cells: cell('<BasedOnStyle>A</BasedOnStyle><FontSize>24</FontSize>') });
+        const before = new XMLSerializer().serializeToString(context.gridDocs.values().next().value);
+        throws(() => applyConsolidation(context, [
+          { type: 'restore', id: analyseStyles(context).redundant[0].id },
+          { type: 'prune', key: 'A' },
+        ]), 'referenced');
+        equal(new XMLSerializer().serializeToString(context.gridDocs.values().next().value), before, 'No partial edit');
+      });
+      await test('Batched variants use distinct keys and reject repeated suggestions', async () => {
+        const small = '<BasedOnStyle>A</BasedOnStyle><FontSize>12</FontSize>';
+        const large = '<BasedOnStyle>A</BasedOnStyle><FontSize>32</FontSize>';
+        const { context } = await fixture({ cells: cell(small) + cell(small, 1) + cell(large, 2) + cell(large, 3) });
+        const entries = analyseStyles(context).variants;
+        const actions = entries.map((entry, i) => ({ type: 'variant', id: entry.id, name: `Variant ${i}` }));
+        const next = applyConsolidation(context, actions);
+        assert(next.stylesDoc.querySelector('[Key="Consolidated 1"]') &&
+          next.stylesDoc.querySelector('[Key="Consolidated 2"]'), 'Distinct generated keys');
+        equal(analyseStyles(next).stats.overrideCells, 0, 'Both groups promoted');
+        throws(() => applyConsolidation(context, [actions[0], actions[0]]), 'twice');
+      });
+      await test('Verifier catches appearance and command changes, including cells without Style', async () => {
+        const { context } = await fixture({ cells: '<Cell><Content><Caption>No style</Caption></Content></Cell>' });
+        const baseline = captureStyleBaseline(context);
+        context.stylesDoc.querySelector('FontSize').textContent = '99';
+        throws(() => verifyStyleBaseline(context, baseline), 'effective cell properties changed');
+        context.stylesDoc.querySelector('FontSize').textContent = '24';
+        context.gridDocs.values().next().value.querySelector('Caption').textContent = 'Changed content';
+        throws(() => verifyStyleBaseline(context, baseline), 'non-style content changed');
+      });
+      await test('Standalone export reopens with unchanged values and binary entries', async () => {
+        const { context } = await fixture({ cells: cell('<BasedOnStyle>A</BasedOnStyle><FontSize>24</FontSize>') });
+        const baseline = captureStyleBaseline(context);
+        const next = applyConsolidation(context, [{ type: 'restore', id: analyseStyles(context).redundant[0].id }]);
+        const blob = await buildModifiedBlob(next);
+        const reopened = await openStyleFile(new File([blob], 'output.gridset'), true);
+        verifyStyleBaseline(reopened.contexts[0], baseline);
+        equal([...await reopened.contexts[0].zip.file('Grids/Main/keep.png').async('uint8array')], [1, 2, 3, 255], 'Image bytes');
+        equal([...await reopened.contexts[0].zip.file('untouched.bin').async('uint8array')], [9, 8, 7], 'Other bytes');
+        equal(context.zip.file('Grids/Main/grid.xml') ? context.dirtyDocs.size : -1, 0, 'Original state untouched');
+      });
+      await test('Nested user export preserves untouched gridsets byte-for-byte and user settings', async () => {
+        const { file } = await fixture({ cells: cell('<BasedOnStyle>A</BasedOnStyle><FontSize>24</FontSize>') });
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        const outer = new JSZip();
+        outer.file('Grid Sets/One.gridset', bytes);
+        outer.file('Grid Sets/Two.gridset', bytes);
+        outer.file('UserSettings/UserSettings.xml', '<Settings><Highlight>keep</Highlight></Settings>');
+        const opened = await openStyleFile(new File([await outer.generateAsync({ type: 'uint8array' })], 'user.grid3user'), true);
+        const [one, two] = opened.contexts;
+        const baseline = captureStyleBaseline(one);
+        opened.contexts[0] = applyConsolidation(one, [{ type: 'restore', id: analyseStyles(one).redundant[0].id }]);
+        const blob = await buildModifiedUserBlob(opened.outerZip, opened.contexts);
+        const saved = await JSZip.loadAsync(await blob.arrayBuffer());
+        equal([...await saved.file('Grid Sets/Two.gridset').async('uint8array')], [...bytes], 'Other gridset bytes');
+        equal(await saved.file('UserSettings/UserSettings.xml').async('string'), '<Settings><Highlight>keep</Highlight></Settings>', 'User settings');
+        const result = await openStyleFile(new File([blob], 'saved.grid3user'), true);
+        verifyStyleBaseline(result.contexts[0], baseline);
+        equal(two.dirtyDocs.size, 0, 'Unreviewed context not dirty');
+      });
+      await test('Exploded user directories preserve unrelated entries and serialise changes', async () => {
+        const { file } = await fixture({ cells: cell('<BasedOnStyle>A</BasedOnStyle><FontSize>24</FontSize>') });
+        const inner = await JSZip.loadAsync(await file.arrayBuffer());
+        const outer = new JSZip();
+        for (const entry of Object.values(inner.files).filter((entry) => !entry.dir)) {
+          outer.file('Vocab/One/' + entry.name, await entry.async('uint8array'));
+        }
+        outer.file('UserSettings/keep.txt', 'untouched');
+        const opened = await openStyleFile(new File([await outer.generateAsync({ type: 'uint8array' })], 'user.grid3user'), true);
+        const context = opened.contexts[0];
+        equal(context.sourceType, 'directory', 'Exploded source');
+        const baseline = captureStyleBaseline(context);
+        opened.contexts[0] = applyConsolidation(context, [{ type: 'restore', id: analyseStyles(context).redundant[0].id }]);
+        const blob = await buildModifiedUserBlob(opened.outerZip, opened.contexts);
+        const result = await openStyleFile(new File([blob], 'saved.grid3user'), true);
+        verifyStyleBaseline(result.contexts[0], baseline);
+        equal(await result.outerZip.file('UserSettings/keep.txt').async('string'), 'untouched', 'Unrelated bytes');
+      });
+      const frame = document.createElement('iframe');
+      frame.title = 'Consolidation wizard fixture';
+      frame.style.width = '1100px';
+      frame.style.height = '800px';
+      document.body.append(frame);
+      const loaded = new Promise((resolve) => frame.addEventListener('load', resolve, { once: true }));
+      frame.src = '../consolidate_stlyes.html';
+      await loaded;
+      const app = frame.contentWindow;
+      const doc = frame.contentDocument;
+      async function waitFor(check, timeout = 15000) {
+        const deadline = Date.now() + timeout;
+        while (!check() && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20));
+        assert(check(), 'Wizard did not reach expected state');
+      }
+      function upload(file) {
+        const transfer = new app.DataTransfer();
+        transfer.items.add(new app.File([file], file.name));
+        doc.getElementById('file-input').files = transfer.files;
+        doc.getElementById('file-input').dispatchEvent(new app.Event('change'));
+      }
+      function go(index) {
+        doc.querySelectorAll('#steps button')[index].click();
+      }
+      function check(input) {
+        input.checked = true;
+        input.dispatchEvent(new app.Event('change', { bubbles: true }));
+      }
+      await waitFor(() => doc.getElementById('upload-section').getAttribute('aria-busy') === 'false');
+      await test('Wizard starts unchecked, applies selected inheritance restoration, and supports undo', async () => {
+        const { file } = await fixture({ cells: cell('<BasedOnStyle>A</BasedOnStyle><FontSize>24</FontSize>') });
+        upload(file);
+        await waitFor(() => !doc.getElementById('wizard').hidden);
+        go(1);
+        equal(doc.querySelectorAll('#step-content input:checked').length, 0, 'No automatic selection');
+        assert(doc.getElementById('apply').disabled, 'Apply disabled until choice');
+        check(doc.querySelector('#step-content input[type=checkbox]'));
+        doc.getElementById('apply').click();
+        await waitFor(() => doc.getElementById('consolidation-status').textContent.startsWith('Applied'));
+        assert(doc.getElementById('stats').textContent.includes('Local properties: 0'), 'Selected change applied');
+        doc.getElementById('undo').click();
+        assert(doc.getElementById('stats').textContent.includes('Local properties: 1'), 'Undo restored baseline');
+        assert(doc.getElementById('undo').disabled, 'No more history');
+        equal(doc.querySelectorAll('#step-content input:checked').length, 0, 'Refreshed suggestions unchecked');
+      });
+      await test('Wizard exports verified output and provides an explicit editor handoff', async () => {
+        check(doc.querySelector('#step-content input[type=checkbox]'));
+        doc.getElementById('apply').click();
+        await waitFor(() => doc.getElementById('consolidation-status').textContent.startsWith('Applied'));
+        go(5);
+        let exported;
+        const original = app.HTMLAnchorElement.prototype.click;
+        app.HTMLAnchorElement.prototype.click = function () {
+          app.HTMLAnchorElement.prototype.click = original;
+          exported = { name: this.download, blob: app.fetch(this.href).then((response) => response.blob()) };
+        };
+        doc.getElementById('download').click();
+        await waitFor(() => !!exported || !doc.getElementById('consolidation-error').hidden, 35000);
+        assert(exported, doc.getElementById('consolidation-error').textContent);
+        equal(exported.name, 'fixture-consolidated.gridset', 'Output name');
+        const reopened = await openStyleFile(new File([await exported.blob], exported.name), true);
+        equal(analyseStyles(reopened.contexts[0]).stats.assignments, 0, 'Export contains selected change');
+        assert(doc.querySelector('#export-section a[href="index.html"]'), 'Manual editor handoff provided');
+      });
+      await test('Wizard keeps user gridset decisions separate and undoes across gridsets', async () => {
+        const confirm = app.confirm;
+        app.confirm = () => true;
+        doc.getElementById('restart').click();
+        app.confirm = confirm;
+        const { file } = await fixture({ cells: cell('<BasedOnStyle>A</BasedOnStyle><FontSize>24</FontSize>') });
+        const zip = new JSZip();
+        zip.file('Grid Sets/One.gridset', new Uint8Array(await file.arrayBuffer()));
+        zip.file('Grid Sets/Two.gridset', new Uint8Array(await file.arrayBuffer()));
+        upload(new File([await zip.generateAsync({ type: 'uint8array' })], 'user.grid3user'));
+        await waitFor(() => !doc.getElementById('wizard').hidden);
+        const picker = doc.getElementById('context-picker');
+        const first = picker.value;
+        go(1);
+        check(doc.querySelector('#step-content input[type=checkbox]'));
+        doc.getElementById('apply').click();
+        await waitFor(() => doc.getElementById('consolidation-status').textContent.startsWith('Applied'));
+        picker.selectedIndex = 1;
+        picker.dispatchEvent(new app.Event('change'));
+        assert(doc.getElementById('stats').textContent.includes('Local properties: 1'), 'Second gridset untouched');
+        doc.getElementById('undo').click();
+        equal(picker.value, first, 'Undo returns to affected gridset');
+        assert(doc.getElementById('stats').textContent.includes('Local properties: 1'), 'First gridset restored');
+        equal(doc.getElementById('decision-log').children.length, 0, 'Decision log restored');
+      });
+      await test('Wizard shows empty cleanup separately, tracks approval through export and restores it on undo', async () => {
+        const confirm = app.confirm;
+        app.confirm = () => true;
+        doc.getElementById('restart').click();
+        app.confirm = confirm;
+        const { file } = await fixture({ cells: '<Cell><Content><Style><BasedOnStyle>Default</BasedOnStyle><FontSize>99</FontSize><TileColour>#11223380</TileColour></Style></Content></Cell>' });
+        upload(file);
+        await waitFor(() => !doc.getElementById('wizard').hidden);
+        go(1);
+        const card = Array.from(doc.querySelectorAll('.consolidation-choice')).find((card) =>
+          card.textContent.includes('Static empty: text formatting'));
+        assert(card && card.textContent.includes('FontSize: 99') &&
+          !card.textContent.includes('TileColour:'), 'Text cleanup separated from visible decoration');
+        assert(!card.querySelector('input').checked, 'Visibility-dependent choice unchecked');
+        check(card.querySelector('input'));
+        doc.getElementById('apply').click();
+        await waitFor(() => doc.getElementById('consolidation-status').textContent.startsWith('Applied'));
+        assert(doc.getElementById('stats').textContent.includes('Local properties: 1'), 'Only text property removed');
+        go(5);
+        let exported;
+        const original = app.HTMLAnchorElement.prototype.click;
+        app.HTMLAnchorElement.prototype.click = function () {
+          app.HTMLAnchorElement.prototype.click = original;
+          exported = { blob: app.fetch(this.href).then((response) => response.blob()) };
+        };
+        doc.getElementById('download').click();
+        await waitFor(() => !!exported || !doc.getElementById('consolidation-error').hidden, 35000);
+        assert(exported, doc.getElementById('consolidation-error').textContent);
+        const saved = (await openStyleFile(new File([await exported.blob], 'saved.gridset'), true)).contexts[0];
+        equal(analyseStyles(saved).stats.assignments, 1, 'Export includes approved removal');
+        assert(doc.getElementById('export-status').textContent.includes('explicitly approved'), 'Verification disclosure');
+        doc.getElementById('undo').click();
+        assert(doc.getElementById('stats').textContent.includes('Local properties: 2'), 'Undo restores formatting');
+        go(1);
+        equal(doc.querySelectorAll('#step-content input:checked').length, 0, 'Undo does not preapprove cleanup');
+      });
+      await test('Select all controls each list separately and keeps Apply in sync', async () => {
+        const confirm = app.confirm;
+        app.confirm = () => true;
+        doc.getElementById('restart').click();
+        app.confirm = confirm;
+        const empty = (size) => `<Cell X="${size}"><Content><Style><BasedOnStyle>Default</BasedOnStyle><FontSize>${size}</FontSize></Style></Content></Cell>`;
+        const { file } = await fixture({
+          styles: named('Default', '<FontSize>24</FontSize>') + named('A', '<Name>Role A</Name><TileColour>#11223380</TileColour>') +
+            named('Unused one', '<FontSize>11</FontSize>') + named('Unused two', '<FontSize>12</FontSize>'),
+          cells: cell('<BasedOnStyle>A</BasedOnStyle><FontSize>24</FontSize>') +
+            cell('<BasedOnStyle>A</BasedOnStyle><TileColour>#11223380</TileColour>', 1) + empty(5) + empty(6),
+        });
+        upload(file);
+        await waitFor(() => !doc.getElementById('wizard').hidden);
+        go(1);
+        const [exact, review] = doc.querySelectorAll('.consolidation-select-all input');
+        assert(exact && review, 'Two Step 2 select-all controls');
+        assert(!exact.checked && !review.checked, 'Select all starts unchecked');
+        const cards = (text) => Array.from(doc.querySelectorAll('.consolidation-choice'))
+          .filter((card) => card.textContent.includes(text)).map((card) => card.querySelector('input'));
+        const restoreInputs = cards('Restore inheritance');
+        const reviewInputs = cards('Static empty');
+        equal([restoreInputs.length, reviewInputs.length], [2, 2], 'Fixture lists');
+        check(exact);
+        assert(restoreInputs.every((input) => input.checked), 'Exact matches selected');
+        assert(reviewInputs.every((input) => !input.checked), 'Appearance-dependent cleanup not selected');
+        assert(!doc.getElementById('apply').disabled, 'Apply enabled');
+        restoreInputs[0].checked = false;
+        restoreInputs[0].dispatchEvent(new app.Event('change'));
+        assert(!exact.checked && exact.indeterminate, 'Partial selection shown');
+        check(restoreInputs[0]);
+        assert(exact.checked && !exact.indeterminate, 'Manual completion checks group');
+        exact.checked = false;
+        exact.dispatchEvent(new app.Event('change'));
+        assert(restoreInputs.every((input) => !input.checked), 'Group cleared');
+        assert(doc.getElementById('apply').disabled, 'Apply disabled after clearing');
+        check(review);
+        assert(reviewInputs.every((input) => input.checked) && restoreInputs.every((input) => !input.checked), 'Review group separate');
+        app.confirm = () => true;
+        go(4);
+        app.confirm = confirm;
+        const prune = doc.querySelector('.consolidation-select-all input');
+        assert(prune, 'Prune select all');
+        check(prune);
+        const pruneInputs = cards('No explicit references');
+        assert(pruneInputs.length === 2 && pruneInputs.every((input) => input.checked), 'Unprotected unused styles selected');
+        doc.getElementById('apply').click();
+        await waitFor(() => doc.getElementById('consolidation-status').textContent.startsWith('Applied'));
+        assert(doc.getElementById('stats').textContent.includes('Named styles: 2'), 'Selected styles pruned');
+      });
+      output.textContent += `\n\n${passed.length} tests passed.`;
+      document.body.dataset.result = 'passed';
+    } catch (error) {
+      output.textContent += `\n\nFAIL ${error.stack || error}`;
+      document.body.dataset.result = 'failed';
+      console.error(error);
+    }
+  </script>
+</body>
+</html>

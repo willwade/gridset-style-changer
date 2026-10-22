@@ -17,6 +17,62 @@
 
 * { box-sizing: border-box; }
 
+[hidden] { display: none !important; }
+
+.consolidation a { color: var(--accent); }
+.consolidation .summary h2 { margin-top: 0; }
+.consolidation-stats, .wizard-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  margin-top: 1rem;
+}
+.consolidation-stats span {
+  background: var(--bg);
+  border-radius: 8px;
+  padding: 0.4rem 0.7rem;
+}
+.wizard-steps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  list-style: none;
+  padding: 0;
+}
+.wizard-steps [aria-current="step"] {
+  color: white;
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.consolidation-warning {
+  border-left: 5px solid var(--warn);
+  background: var(--warn-bg);
+  padding: 0.8rem 1rem;
+}
+.consolidation-choice { margin: 0.8rem 0; overflow-wrap: anywhere; }
+.consolidation-choice-label { display: flex; align-items: flex-start; gap: 0.7rem; }
+.consolidation-select-all {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  margin: 0.5rem 0 0.75rem;
+  font-weight: 600;
+}
+.consolidation-choice input[type="checkbox"] { margin-top: 0.4rem; flex-shrink: 0; }
+.consolidation-choice details, .consolidation-choice > label { font-size: 0.9rem; }
+.table-scroll { overflow-x: auto; }
+.consolidation-table { width: 100%; border-collapse: collapse; margin-top: 1rem; }
+.consolidation-table th, .consolidation-table td {
+  text-align: left;
+  vertical-align: top;
+  padding: 0.6rem;
+  border-bottom: 1px solid var(--border);
+  overflow-wrap: anywhere;
+}
+.consolidation-table td:first-child { min-width: 13rem; }
+.consolidation summary { cursor: pointer; }
+.consolidation :focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+
 html { font-size: 17px; }
 
 body {
