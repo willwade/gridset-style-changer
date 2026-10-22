@@ -30,6 +30,74 @@ The common tile retains shared RGB and transparency independently after Apply, s
 mixed transparency does not hide a colour applied throughout.
 Font choices use dropdowns with a Custom font option in both Common fixes and individual styles.
 
+## Cell changer
+
+[The cell changer](gridset-cell-changer.html) is a separate page for bulk-editing
+cells. It uses the same loading, `.grid3user` handling, export and validation as the
+style tools. Its first tool, **Add commands to matching cells**, works as follows:
+
+- **Choose cells** using any combination of: commands the cell already has (listed
+  with counts from the uploaded file), auto-content types (e.g. `AutoContent/Prediction`,
+  `AutoContent/Chat.History`), a regular expression over text the cell inserts (letter,
+  punctuation, space and Insert text commands) or its caption. A cell matches if it meets
+  **any** of these, and it must also pass the optional include/exclude grid-name filters.
+- A preset selects speak, prediction, chat history, space and punctuation cells
+  (including Insert text cells that insert only punctuation or spaces).
+- **Paste the commands** as one or more `<Command>` elements, exactly as they appear in a
+  cell's `<Commands>` in `grid.xml`, optionally wrapped in `<Commands>`. Choose whether they
+  go before or after the existing commands.
+- **Auto-content cells** (prediction, chat history, word list, message banking, …) do not run
+  commands stored on the cell. Grid 3 stores their commands once per grid and type in
+  `<AutoContentCommands>/<AutoContentCommandCollection AutoContentType="…">`, so all cells
+  of that type in a grid share them. The tool reads and writes that shared collection,
+  creating it Grid 3's way (with `AutoContent.Activate`) when missing. Matching by command
+  also uses the shared commands, so e.g. word-list cells whose shared commands include
+  `Action.Speak` count as speak cells.
+- By default a command is skipped where the cell already has one with the same ID and
+  parameters, so re-running is safe. Changes can be undone during the session.
+- Preview lists every matching cell and the reason it matched before anything changes.
+  For `.grid3user` files, choose which gridsets to change; the rest are preserved.
+
+### Change schemas
+
+A change schema is a small JSON file (`*.cellschema.json`) holding one or more changes:
+cell criteria, commands XML, position and duplicate handling. It contains no gridset content.
+
+- **Save** at the bottom of the page: the changes applied this session (undone
+  changes are excluded), the current form settings, or the loaded schema(s).
+- **Load** with the *Load change schema(s)…* link above *Which cells?*, or choose a built-in
+  preset. A single-change schema fills in the form; any change can be loaded into the form
+  for editing, and *Apply all changes* applies every change in order. Built-in presets only
+  select cells, so paste the commands to add.
+- **Combine** schemas by selecting several files at once in the load dialog. Their changes
+  are applied in the order the files are listed. Save *Loaded schema(s)* to keep the
+  combination as one file.
+
+```json
+{
+  "type": "gridset-cell-changer-schema",
+  "version": 1,
+  "name": "Speak test",
+  "description": "",
+  "changes": [{
+    "tool": "add-commands",
+    "criteria": {
+      "commandIds": ["Action.Speak"], "contentTypes": ["AutoContent/Prediction"],
+      "insertedText": "", "caption": "", "includeGrids": "", "excludeGrids": ""
+    },
+    "commands": "<Command ID=\"Speech.SpeakNow\"><Parameter Key=\"text\">hi</Parameter></Command>",
+    "position": "end",
+    "skipExisting": true
+  }]
+}
+```
+
+Commands are not checked for meaning. Test the result in Grid 3.
+
+With a local static server running, open [the cell changer regression tests](tests/cell-changer.html)
+for cell matching, command XML parsing, element ordering, shared auto-content commands,
+duplicate skipping, undo, archive round-trips and change schemas.
+
 ## Run locally
 
 Any static server works (module scripts need http, not `file://`):

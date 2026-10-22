@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Cell changer regression tests</title></head>
+<body>
+  <h1>Cell changer regression tests</h1>
+  <pre id="results">Running...</pre>
+  <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+  <script type="module">
+    import { openStyleFile, buildModifiedBlob, buildModifiedUserBlob } from '../js/archives.js';
+    import {
+      inventoryCells, summariseCells, findMatches, parseCommandsXml,
+      addCommands, undoAddCommands,
+    } from '../js/cell-commands.js';
+    import {
+      BUILT_IN_SCHEMAS, makeSchema, readSchema, combineSchemas, schemaFileName, describeChange,
+    } from '../js/cell-schema.js';
+
+    const output = document.getElementById('results');
+    const passed = [];
+    const assert = (value, message) => { if (!value) throw new Error(message); };
+    function equal(actual, expected, message) {
+      assert(JSON.stringify(actual) === JSON.stringify(expected),
+        `${message}: expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`);
+    }
+    function throws(run, fragment) {
+      let error;
+      try { run(); } catch (caught) { error = caught; }
+      assert(error && error.message.includes(fragment), `Expected error containing "${fragment}", got ${error?.message}`);
+    }
+    async function test(name, run) {
+      await run();
+      passed.push(name);
+      output.textContent = passed.map((name) => `PASS ${name}`).join('\n');
+    }
+    const style = '<Style><BasedOnStyle>A</BasedOnStyle></Style>';
+    const commandCell = (x, commands, caption = '') =>
+      `<Cell X="${x}"><Content><Commands>${commands}</Commands>` +
+      `<CaptionAndImage><Caption>${caption}</Caption></CaptionAndImage>${style}</Content></Cell>`;
+    const autoCell = (x, subType) =>
+      `<Cell X="${x}"><Content><ContentType>AutoContent</ContentType><ContentSubType>${subType}</ContentSubType>` +
+      `<CaptionAndImage xsi:nil="true" />${style}</Content></Cell>`;
+    const collection = (type, extra = '') =>
+      `<AutoContentCommandCollection AutoContentType="${type}"><Commands>${extra}<Command ID="AutoContent.Activate">` +
+      `<Parameter Key="autocontenttype">${type}</Parameter></Command></Commands></AutoContentCommandCollection>`;
+    const insert = (text) => `<Command ID="Action.InsertText"><Parameter Key="text">
+              <p>
+                <s><r>${text}</r></s>
+              </p>
+            </Parameter></Command>`;
+    const mainCells = [
+      commandCell(0, '<Command ID="Action.Speak"><Parameter Key="movecaret">0</Parameter></Command>', 'Speak'),
+      autoCell(1, 'Prediction'),
+      autoCell(2, 'Chat.History'),
+      commandCell(3, '<Command ID="Action.Space" /><Command ID="Settings.FastTypingDwell" />', 'space'),
+      commandCell(4, '<Command ID="Action.Punctuation"><Parameter Key="letter">,</Parameter></Command>', ','),
+      commandCell(5, '<Command ID="Action.Letter"><Parameter Key="letter">a</Parameter></Command>', 'a'),
+      commandCell(6, insert('?')),
+      commandCell(7, insert('hello')),
+      commandCell(8, '<Command ID="Action.InsertText"><Parameter Key="text"><r></r></Parameter></Command>'),
+      autoCell(9, 'WordList'),
+      '<Cell X="10" />',
+      autoCell(11, 'Prediction'),
+    ].join('');
+    // Main mirrors Grid 3 output (one collection per type used; WordList deliberately missing).
+    // Settings menu has no AutoContentCommands element at all.
+    const grid = (cells, autoContent = null) =>
+      `<Grid xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><GridGuid>g</GridGuid><RowDefinitions />` +
+      (autoContent === null ? '' : `<AutoContentCommands>${autoContent}</AutoContentCommands>`) +
+      `<Cells>${cells}</Cells><WordList /></Grid>`;
+    async function gridsetBytes() {
+      const zip = new JSZip();
+      zip.file('Settings0/Styles/styles.xml', '<StyleData><Styles><Style Key="A" /></Styles></StyleData>');
+      zip.file('Grids/Main/grid.xml', grid(mainCells,
+        collection('Prediction', '<Command ID="Action.Speak" />') + collection('Chat.History')));
+      zip.file('Grids/Settings menu/grid.xml', grid(
+        commandCell(0, '<Command ID="Action.Speak" />', 'Speak') + autoCell(1, 'Prediction')));
+      zip.file('untouched.bin', new Uint8Array([9, 8, 7]));
+      return zip.generateAsync({ type: 'uint8array' });
+    }
+    async function fixture() {
+      const file = new File([await gridsetBytes()], 'fixture.gridset');
+      return (await openStyleFile(file)).contexts[0];
+    }
+    const preset = BUILT_IN_SCHEMAS[0].changes[0].criteria;
+    const newCommands = '<Command ID="Speech.SpeakNow"><Parameter Key="text">hi</Parameter></Command><Command ID="Action.Clear" />';
+    const presetMatches = ['Main:0', 'Main:1', 'Main:2', 'Main:3', 'Main:4', 'Main:6', 'Main:11', 'Settings menu:0', 'Settings menu:1'];
+    const at = (matches) => matches.map((m) => `${m.grid}:${m.x}`);
+    const mainDoc = (context) => context.gridDocs.get('Grids/Main/grid.xml');
+    const settingsDoc = (context) => context.gridDocs.get('Grids/Settings menu/grid.xml');
+    const ids = (parent) => Array.from(parent?.children || [], (c) => c.getAttribute('ID'));
+    const sharedCommands = (doc, type) => Array.from(doc.getElementsByTagName('AutoContentCommandCollection'))
+      .find((c) => c.getAttribute('AutoContentType') === type)?.querySelector('Commands');
+    const cellAt = (doc, x) => Array.from(doc.getElementsByTagName('Cell')).find((c) => (c.getAttribute('X') || '0') === String(x));
+    const serialize = (doc) => new XMLSerializer().serializeToString(doc);
+
+    try {
+      await test('Inventory reads commands, auto-content types and inserted text', async () => {
+        const context = await fixture();
+        const cells = inventoryCells(context);
+        equal(cells.length, 13, 'Cells with content');
+        const summary = summariseCells(cells);
+        equal(summary.contentTypes.map((c) => c.key), ['AutoContent/Prediction', 'AutoContent/Chat.History', 'AutoContent/WordList'], 'Content types');
+        const text = Object.fromEntries(cells.filter((c) => c.grid === 'Main').map((c) => [c.x, c.insertedTexts]));
+        equal([text[3], text[4], text[5], text[6], text[7], text[8]], [[' '], [','], ['a'], ['?'], ['hello'], []], 'Inserted texts');
+      });
+
+      await test('Auto-content cells report their grid\'s shared commands, not cell-level ones', async () => {
+        const cells = inventoryCells(await fixture());
+        const byKey = Object.fromEntries(cells.map((c) => [`${c.grid}:${c.x}`, c]));
+        equal(byKey['Main:1'].commandIds, ['Action.Speak', 'AutoContent.Activate'], 'Prediction shared');
+        equal(byKey['Main:2'].commandIds, ['AutoContent.Activate'], 'Chat history shared');
+        equal(byKey['Main:9'].commandIds, [], 'Missing collection');
+        equal(byKey['Main:1'].autoContentType, 'Prediction', 'Type');
+        equal(byKey['Main:0'].autoContentType, null, 'Normal cell');
+        equal(summariseCells(cells).commandIds.find((c) => c.key === 'Action.Speak').count, 4, 'Speak per cell');
+      });
+
+      await test('Preset matches speak, prediction, chat history, space and punctuation only', async () => {
+        equal(at(findMatches(inventoryCells(await fixture()), preset)), presetMatches, 'Preset matches');
+      });
+
+      await test('Grid filters, caption criterion and empty criteria', async () => {
+        const cells = inventoryCells(await fixture());
+        equal(at(findMatches(cells, { ...preset, excludeGrids: 'settings' })).length, 7, 'Exclude grid');
+        equal(at(findMatches(cells, { ...preset, includeGrids: '^settings' })), ['Settings menu:0', 'Settings menu:1'], 'Include grid');
+        equal(at(findMatches(cells, { caption: '^speak$' })), ['Main:0', 'Settings menu:0'], 'Caption');
+        equal(findMatches(cells, { includeGrids: '.' }).length, 0, 'Grid filter alone matches nothing');
+        throws(() => findMatches(cells, { caption: '(' }), 'Caption pattern');
+      });
+
+      await test('Commands XML parsing accepts fragments and wrappers, rejects bad input', async () => {
+        equal(parseCommandsXml(newCommands).map((c) => c.getAttribute('ID')), ['Speech.SpeakNow', 'Action.Clear'], 'Fragment');
+        equal(parseCommandsXml(`<?xml version="1.0"?><Commands>${newCommands}</Commands>`).length, 2, 'Wrapper');
+        equal(parseCommandsXml('<Command ID="X"><Parameter Key="p" xsi:nil="true" /></Command>').length, 1, 'xsi prefix');
+        throws(() => parseCommandsXml(''), 'Paste');
+        throws(() => parseCommandsXml('<Command ID="X">'), 'not well-formed');
+        throws(() => parseCommandsXml('<Cell />'), 'Only <Command>');
+        throws(() => parseCommandsXml('<Command />'), 'ID attribute');
+      });
+
+      await test('Auto-content commands go into the grid\'s shared collection, once per grid and type', async () => {
+        const context = await fixture();
+        const record = addCommands(findMatches(inventoryCells(context), preset), parseCommandsXml(newCommands));
+        equal([record.cellsChanged, record.sharedChanged], [9, 3], 'Cells and shared sets');
+        const main = mainDoc(context);
+        equal(ids(sharedCommands(main, 'Prediction')),
+          ['Action.Speak', 'AutoContent.Activate', 'Speech.SpeakNow', 'Action.Clear'], 'Prediction shared (both cells, added once)');
+        equal(ids(sharedCommands(main, 'Chat.History')), ['AutoContent.Activate', 'Speech.SpeakNow', 'Action.Clear'], 'Chat history shared');
+        assert(!cellAt(main, 1).querySelector('Commands'), 'No ignored cell-level Commands on auto-content');
+        equal(ids(cellAt(main, 3).querySelector('Commands')),
+          ['Action.Space', 'Settings.FastTypingDwell', 'Speech.SpeakNow', 'Action.Clear'], 'Normal cell appended');
+        const settings = settingsDoc(context);
+        equal(Array.from(settings.documentElement.children, (c) => c.localName),
+          ['GridGuid', 'RowDefinitions', 'AutoContentCommands', 'Cells', 'WordList'], 'Container created before Cells');
+        const created = settings.getElementsByTagName('AutoContentCommandCollection')[0];
+        equal(created.getAttribute('AutoContentType'), 'Prediction', 'Created collection type');
+        equal(ids(created.querySelector('Commands')), ['AutoContent.Activate', 'Speech.SpeakNow', 'Action.Clear'], 'Activate kept first');
+        equal(created.querySelector('Parameter').textContent, 'Prediction', 'Activate parameter');
+        equal(context.dirtyDocs.size, 2, 'Both grids dirty');
+      });
+
+      await test('Missing collection is created inside an existing container; start position respected', async () => {
+        const context = await fixture();
+        addCommands(findMatches(inventoryCells(context), { contentTypes: ['AutoContent/WordList', 'AutoContent/Prediction'] }),
+          parseCommandsXml(newCommands), { position: 'start' });
+        const main = mainDoc(context);
+        equal(main.getElementsByTagName('AutoContentCommands').length, 1, 'One container');
+        equal(ids(sharedCommands(main, 'WordList')), ['Speech.SpeakNow', 'Action.Clear', 'AutoContent.Activate'], 'WordList created');
+        equal(ids(sharedCommands(main, 'Prediction')),
+          ['Speech.SpeakNow', 'Action.Clear', 'Action.Speak', 'AutoContent.Activate'], 'Prepended to shared');
+      });
+
+      await test('Re-running skips commands already present unless asked not to', async () => {
+        const context = await fixture();
+        const commands = parseCommandsXml(newCommands);
+        addCommands(findMatches(inventoryCells(context), preset), commands);
+        const again = addCommands(findMatches(inventoryCells(context), preset), commands);
+        equal([again.cellsChanged, again.cellsSkipped], [0, 9], 'Skipped');
+        const forced = addCommands(findMatches(inventoryCells(context), { commandIds: ['Action.Space'] }), commands, { skipExisting: false });
+        equal(forced.cellsChanged, 1, 'Forced duplicates');
+      });
+
+      await test('Undo restores the original XML and dirty state, including created containers', async () => {
+        const context = await fixture();
+        const before = [serialize(mainDoc(context)), serialize(settingsDoc(context))];
+        const first = addCommands(findMatches(inventoryCells(context), preset), parseCommandsXml(newCommands));
+        const second = addCommands(findMatches(inventoryCells(context), { contentTypes: ['AutoContent/WordList', 'AutoContent/Prediction'] }),
+          parseCommandsXml('<Command ID="Jump.Back" />'));
+        undoAddCommands(second);
+        equal(context.dirtyDocs.size, 2, 'First change still dirty');
+        equal(sharedCommands(mainDoc(context), 'WordList'), undefined, 'Created collection removed');
+        undoAddCommands(first);
+        equal([serialize(mainDoc(context)), serialize(settingsDoc(context))], before, 'XML restored');
+        equal(context.dirtyDocs.size, 0, 'Nothing dirty');
+      });
+
+      await test('Standalone gridset export round-trips and preserves other entries', async () => {
+        const context = await fixture();
+        addCommands(findMatches(inventoryCells(context), preset), parseCommandsXml(newCommands));
+        const blob = await buildModifiedBlob(context);
+        const zip = await JSZip.loadAsync(blob);
+        equal(Array.from(await zip.file('untouched.bin').async('uint8array')), [9, 8, 7], 'Binary kept');
+        const reopened = (await openStyleFile(new File([blob], 'out.gridset'))).contexts[0];
+        equal(at(findMatches(inventoryCells(reopened), { commandIds: ['Speech.SpeakNow'] })), presetMatches, 'Commands persisted');
+      });
+
+      await test('User file: only targeted gridsets change and nested archive is rewritten', async () => {
+        const bytes = await gridsetBytes();
+        const outer = new JSZip();
+        outer.file('Grid 3/Users/Me/Grid Sets/One.gridset', bytes);
+        outer.file('Grid 3/Users/Me/Grid Sets/Two.gridset', bytes);
+        outer.file('Grid 3/Users/Me/Settings/keep.xml', '<Keep/>');
+        const file = new File([await outer.generateAsync({ type: 'uint8array' })], 'me.grid3user');
+        const state = await openStyleFile(file);
+        equal(state.contexts.length, 2, 'Two gridsets');
+        addCommands(findMatches(inventoryCells(state.contexts[0]), preset), parseCommandsXml(newCommands));
+        const blob = await buildModifiedUserBlob(state.outerZip, state.contexts);
+        const reopened = await openStyleFile(new File([blob], 'me.grid3user'));
+        const counts = reopened.contexts.map((c) => findMatches(inventoryCells(c), { commandIds: ['Speech.SpeakNow'] }).length);
+        equal(counts, [9, 0], 'Only first gridset changed');
+        const zip = await JSZip.loadAsync(blob);
+        equal(await zip.file('Grid 3/Users/Me/Settings/keep.xml').async('string'), '<Keep/>', 'User settings kept');
+      });
+
+      await test('Change schemas round-trip through JSON and normalise defaults', async () => {
+        const schema = makeSchema('  My schema ', [{
+          criteria: { commandIds: ['Action.Speak'], contentTypes: ['AutoContent/Prediction'], insertedText: '^[.,]$' },
+          commands: `  ${newCommands}  `, position: 'start',
+        }], 'desc');
+        const read = readSchema(JSON.stringify(schema));
+        equal(read.name, 'My schema', 'Name trimmed');
+        equal(read.ready, true, 'Ready');
+        equal(read.changes[0].criteria, {
+          commandIds: ['Action.Speak'], contentTypes: ['AutoContent/Prediction'],
+          insertedText: '^[.,]$', caption: '', includeGrids: '', excludeGrids: '',
+        }, 'Criteria normalised');
+        equal([read.changes[0].position, read.changes[0].skipExisting, read.changes[0].commands], ['start', true, newCommands], 'Options');
+        equal(schemaFileName(read), 'my-schema.cellschema.json', 'File name');
+        assert(describeChange(read.changes[0]).startsWith('Add Speech.SpeakNow, Action.Clear (before existing)'), 'Description');
+      });
+
+      await test('Applying a loaded schema gives the same result as the form', async () => {
+        const context = await fixture();
+        const change = readSchema(makeSchema('x', [{ criteria: preset, commands: newCommands }])).changes[0];
+        const record = addCommands(findMatches(inventoryCells(context), change.criteria), parseCommandsXml(change.commands), change);
+        equal([record.cellsChanged, record.sharedChanged], [9, 3], 'Same counts');
+      });
+
+      await test('Built-in presets are valid selection-only schemas', async () => {
+        for (const schema of BUILT_IN_SCHEMAS) {
+          const read = readSchema(schema);
+          equal(read.ready, false, `${schema.name} has no commands`);
+        }
+      });
+
+      await test('Combining schemas concatenates changes in order and names', async () => {
+        const one = makeSchema('One', [{ criteria: { commandIds: ['Action.Speak'] }, commands: newCommands }], 'first');
+        const two = makeSchema('Two', [
+          { criteria: { contentTypes: ['AutoContent/Prediction'] }, commands: '<Command ID="Jump.Back" />' },
+          { criteria: { caption: 'x' }, commands: '<Command ID="Jump.Home" />' },
+        ]);
+        const combined = combineSchemas([one, JSON.stringify(two)]);
+        equal(combined.name, 'One + Two', 'Name');
+        equal(combined.description, 'One: first', 'Description');
+        equal(combined.changes.map((c) => parseCommandsXml(c.commands)[0].getAttribute('ID')),
+          ['Speech.SpeakNow', 'Jump.Back', 'Jump.Home'], 'Order');
+        equal(combined.ready, true, 'Ready');
+        equal(combineSchemas([one]).name, 'One', 'Single schema unchanged');
+        equal(combineSchemas([one, BUILT_IN_SCHEMAS[0]]).ready, false, 'Selection-only change blocks apply-all');
+        const context = await fixture();
+        let total = 0;
+        for (const change of combined.changes) {
+          total += addCommands(findMatches(inventoryCells(context), change.criteria), parseCommandsXml(change.commands), change).cellsChanged;
+        }
+        equal(total, 4 + 3, 'All changes applied');
+      });
+
+      await test('Invalid schemas are rejected with clear messages', async () => {
+        throws(() => readSchema('{'), 'not a valid change schema');
+        throws(() => readSchema({ type: 'other' }), 'not a Gridset Cell Changer');
+        throws(() => readSchema({ type: 'gridset-cell-changer-schema', version: 99, changes: [] }), 'newer version');
+        throws(() => readSchema({ type: 'gridset-cell-changer-schema', version: 1, changes: [] }), 'no changes');
+        const base = { type: 'gridset-cell-changer-schema', version: 1 };
+        throws(() => readSchema({ ...base, changes: [{ tool: 'delete-cells' }] }), 'unsupported tool');
+        throws(() => readSchema({ ...base, changes: [{ tool: 'add-commands', criteria: {} }] }), 'no cell criteria');
+        throws(() => readSchema({ ...base, changes: [{ tool: 'add-commands', criteria: { caption: '(' } }] }), 'Caption pattern');
+        throws(() => readSchema({ ...base, changes: [{ tool: 'add-commands', criteria: { caption: 'x' }, commands: '<Cell/>' }] }), 'Change 1: Only <Command>');
+      });
+
+      output.textContent += '\n\nALL PASSED';
+    } catch (error) {
+      output.textContent += `\n\nFAIL: ${error.message}`;
+      console.error(error);
+    }
+  </script>
+</body>
+</html>

@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="robots" content="noindex">
+  <title>Gridset Cell Changer</title>
+  <link rel="stylesheet" href="css/style.css">
+  <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+</head>
+<body>
+  <header>
+    <h1>Gridset Cell Changer</h1>
+    <p class="tagline">Bulk-edit cells in Grid 3 gridsets. Everything runs in your browser; files never leave your device.</p>
+  </header>
+  <main class="consolidation cell-changer">
+    <p><a href="index.html">Style changer</a> &middot; <a href="consolidate_stlyes.html">Style consolidator</a></p>
+    <section id="upload-section" aria-busy="true">
+      <div id="drop-zone" tabindex="0" role="button" aria-label="Choose a gridset or user file">
+        <div class="dz-icon" aria-hidden="true">&#128193;</div>
+        <p><strong>Drop a .gridset or .grid3user file here</strong> or click to choose</p>
+        <input type="file" id="file-input" accept=".gridset,.grid3user" hidden>
+      </div>
+    </section>
+    <p id="cell-error" class="error" role="alert" hidden></p>
+
+    <section id="editor-section" hidden>
+      <div class="summary">
+        <strong id="file-name"></strong>
+        <p id="file-stats" class="cards-hint"></p>
+        <section id="user-gridsets" class="user-gridsets" hidden>
+          <p class="hint"><b>Change cells in these gridsets:</b></p>
+          <div id="gridset-targets" class="gridset-targets"></div>
+        </section>
+        <div class="wizard-actions">
+          <button class="btn" id="undo" disabled>Undo last change</button>
+          <button class="btn" id="restart">Start again with another file</button>
+        </div>
+      </div>
+
+      <section class="summary" aria-labelledby="add-commands-title">
+        <h2 id="add-commands-title">Add commands to matching cells</h2>
+        <p>Choose which cells to change, paste the commands to add, check the preview, then apply. A cell matches if it meets <strong>any</strong> of the cell criteria and passes the grid filters. Prediction, chat history and other auto-content cells share one set of commands per grid and type, so adding to one adds to all of that type in the grid.</p>
+
+        <p class="schema-load">
+          <a href="#" id="open-schema" title="Select several files to combine them">Load change schema(s)&hellip;</a>
+          <input type="file" id="schema-input" accept=".json,application/json" multiple hidden>
+          <span class="cards-hint">or a preset:</span>
+          <select id="schema-presets" aria-label="Preset change schemas">
+            <option value="">Choose a preset&hellip;</option>
+          </select>
+        </p>
+        <div id="schema-panel" class="fix-card" hidden>
+          <strong id="schema-name"></strong>
+          <p id="schema-description" class="hint"></p>
+          <ol id="schema-changes"></ol>
+          <div class="wizard-actions">
+            <button class="btn btn-primary" id="schema-apply-all">Apply all changes</button>
+            <button class="btn" id="schema-close">Close</button>
+          </div>
+        </div>
+
+        <h3>1 &middot; Which cells?</h3>
+        <div class="wizard-actions">
+          <button class="btn" id="clear-criteria">Clear criteria</button>
+        </div>
+        <div class="criteria-grid">
+          <fieldset class="fix-card">
+            <legend>Cells with any of these commands</legend>
+            <input type="text" id="command-filter" placeholder="Filter commands, e.g. Speak" aria-label="Filter command list">
+            <div id="command-list" class="check-list"></div>
+          </fieldset>
+          <fieldset class="fix-card">
+            <legend>Auto-content cells of these types</legend>
+            <p class="hint">For example prediction, chat history or word list cells.</p>
+            <div id="content-list" class="check-list"></div>
+          </fieldset>
+        </div>
+        <div class="fix-card">
+          <div class="fix-controls criteria-text">
+            <label>Inserted text matches
+              <input type="text" id="inserted-text" placeholder="Regular expression">
+            </label>
+            <label>Caption matches
+              <input type="text" id="caption-pattern" placeholder="Regular expression">
+            </label>
+            <label>Only grids named
+              <input type="text" id="include-grids" placeholder="Regular expression (all grids if blank)">
+            </label>
+            <label>Except grids named
+              <input type="text" id="exclude-grids" placeholder="Regular expression">
+            </label>
+          </div>
+          <p class="hint">Inserted text checks letters, punctuation, space and Insert text commands. Patterns are case-insensitive JavaScript regular expressions, e.g. <code>^[\p{P}\p{S}\s]+$</code> for punctuation or spaces only.</p>
+        </div>
+
+        <h3>2 &middot; Commands to add</h3>
+        <label for="commands-xml">Paste one or more <code>&lt;Command&gt;</code> elements (as found inside a cell's <code>&lt;Commands&gt;</code> in grid.xml)</label>
+        <textarea id="commands-xml" rows="8" spellcheck="false" placeholder='&lt;Command ID="Speech.SpeakNow"&gt;&#10;  &lt;Parameter Key="text"&gt;hello&lt;/Parameter&gt;&#10;&lt;/Command&gt;'></textarea>
+        <p id="commands-status" class="cards-hint" role="status"></p>
+        <div class="fix-controls">
+          <label>Position
+            <select id="position">
+              <option value="end" selected>After the cell's existing commands</option>
+              <option value="start">Before the cell's existing commands</option>
+            </select>
+          </label>
+        </div>
+        <label class="scope-toggle">
+          <input type="checkbox" id="skip-existing" checked>
+          Don't add a command the cell already has (same ID and parameters), so re-running is safe
+        </label>
+
+        <h3>3 &middot; Preview and apply</h3>
+        <div id="preview" role="status" aria-live="polite"></div>
+        <div class="wizard-actions">
+          <button class="btn btn-primary" id="apply" disabled>Add commands to matching cells</button>
+        </div>
+        <p id="apply-result" class="fix-result" hidden></p>
+      </section>
+
+      <details class="summary">
+        <summary>Changes applied in this session <span id="change-count"></span></summary>
+        <ol id="change-log"></ol>
+      </details>
+
+      <section class="summary">
+        <h2>Download</h2>
+        <p>Only changed grids are rewritten; everything else in the file is preserved. The result is checked with the Grid 3 structural validator (advisory).</p>
+        <button class="btn btn-primary" id="download" disabled>Download modified file</button>
+        <div id="verify-status" role="status" aria-live="polite"></div>
+      </section>
+
+      <section class="summary" aria-labelledby="save-schema-title">
+        <h2 id="save-schema-title">Save as a change schema</h2>
+        <p>Save the cell criteria and commands so the same changes can be loaded and applied to other gridsets. The schema does not contain any gridset content.</p>
+        <div class="fix-controls">
+          <label>Name
+            <input type="text" id="schema-save-name" placeholder="e.g. Clear and speak on prediction">
+          </label>
+          <label>Save
+            <select id="schema-save-source">
+              <option value="history">Changes applied this session</option>
+              <option value="form">Current settings in the form</option>
+              <option value="loaded" disabled>Loaded schema(s)</option>
+            </select>
+          </label>
+        </div>
+        <label for="schema-save-description" class="scope-toggle">Description (optional)</label>
+        <textarea id="schema-save-description" rows="2"></textarea>
+        <div class="wizard-actions">
+          <button class="btn btn-primary" id="schema-save">Save change schema</button>
+        </div>
+        <p id="schema-save-status" class="cards-hint" role="status"></p>
+      </section>
+    </section>
+  </main>
+  <footer><p>AACTools &middot; Gridset Cell Changer &middot; Not affiliated with Smartbox. Always test edited gridsets in Grid 3 before distributing.</p></footer>
+  <script type="module">
+    try {
+      await import('./js/cell-changer-app.js');
+    } catch (error) {
+      const box = document.getElementById('cell-error');
+      box.textContent = 'Could not load the cell changer or its dependencies. Check your connection and reload.';
+      box.hidden = false;
+      console.error('Could not load the cell changer:', error);
+    }
+  </script>
+</body>
+</html>
