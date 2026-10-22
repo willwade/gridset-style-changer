@@ -1,5 +1,4 @@
 import {
-  openGridset,
   getNamedStyles,
   isDefaultStyle,
   ensureDefaultStyle,
@@ -17,6 +16,11 @@ import {
   styleContrastInfo,
   styleAppearance,
 } from './gridset.js';
+import {
+  openGridsetContext, openGrid3User,
+  buildModifiedBlob as exportGridset,
+  buildModifiedUserBlob as exportUser,
+} from './archives.js';
 
 const state = {
   fileName: null,
@@ -133,58 +137,6 @@ async function handleFile(file) {
   } catch (err) {
     setUploadError(err.message || 'Could not read this Grid 3 file.');
   }
-}
-
-async function openGridsetContext(name, file, sourceType, sourcePath = '') {
-  const opened = await openGridset(file);
-  return {
-    id: `${sourceType}:${sourcePath || name}`,
-    name,
-    sourceType,
-    sourcePath,
-    ...opened,
-    dirtyDocs: new Set(),
-  };
-}
-
-async function openGrid3User(file) {
-  const zip = await JSZip.loadAsync(file);
-  const contexts = [];
-  const entries = Object.values(zip.files).filter((entry) => !entry.dir);
-  const gridsetFiles = entries.filter((entry) => /\.gridset$/i.test(entry.name));
-  for (const entry of gridsetFiles) {
-    const blob = await entry.async('blob');
-    contexts.push(await openGridsetContext(entry.name, blob, 'archive', entry.name));
-  }
-
-  const prefixes = new Set();
-  for (const entry of entries) {
-    const match = /^(.*?)(?:Settings0\/Styles\/styles\.xml)$/i.exec(entry.name);
-    if (match) prefixes.add(match[1]);
-  }
-
-  for (const prefix of prefixes) {
-    const hasGrid = entries.some((entry) =>
-      entry.name.startsWith(prefix) &&
-      /^Grids\/.+\/grid\.xml$/i.test(entry.name.slice(prefix.length))
-    );
-    if (!hasGrid) continue;
-
-    const gridsetZip = new JSZip();
-    for (const entry of entries) {
-      if (entry.name.startsWith(prefix)) {
-        gridsetZip.file(entry.name.slice(prefix.length), await entry.async('uint8array'));
-      }
-    }
-    const name = prefix.replace(/\/$/, '') || 'Gridset';
-    const gridsetBlob = await gridsetZip.generateAsync({ type: 'blob' });
-    contexts.push(await openGridsetContext(name, gridsetBlob, 'directory', prefix));
-  }
-
-  if (contexts.length === 0) {
-    throw new Error('No gridsets were found in this .grid3user file.');
-  }
-  return { zip, contexts };
 }
 
 function useActiveContext() {
@@ -765,42 +717,11 @@ function renderGridList() {
 }
 
 async function buildModifiedBlob(context = state.activeContext) {
-  const zip = context.zip;
-  const serializer = new XMLSerializer();
-  if (context.dirtyDocs.has(context.stylesDoc)) {
-    zip.file(context.stylesPath, serializer.serializeToString(context.stylesDoc));
-  }
-  for (const [name, doc] of context.gridDocs) {
-    if (context.dirtyDocs.has(doc)) {
-      zip.file(name, serializer.serializeToString(doc));
-    }
-  }
-  return zip.generateAsync({ type: 'blob', compression: 'DEFLATE' });
+  return exportGridset(context);
 }
 
 async function buildModifiedUserBlob() {
-  const output = state.outerZip;
-  const serializer = new XMLSerializer();
-  for (const context of state.contexts) {
-    if (context.dirtyDocs.size === 0) continue;
-    if (context.sourceType === 'archive') {
-      const blob = await buildModifiedBlob(context);
-      output.file(context.sourcePath, new Uint8Array(await blob.arrayBuffer()));
-    } else {
-      if (context.dirtyDocs.has(context.stylesDoc)) {
-        output.file(
-          context.sourcePath + context.stylesPath,
-          serializer.serializeToString(context.stylesDoc)
-        );
-      }
-      for (const [name, doc] of context.gridDocs) {
-        if (context.dirtyDocs.has(doc)) {
-          output.file(context.sourcePath + name, serializer.serializeToString(doc));
-        }
-      }
-    }
-  }
-  return output.generateAsync({ type: 'blob', compression: 'DEFLATE' });
+  return exportUser(state.outerZip, state.contexts);
 }
 
 function clearVerifyStatus() {
