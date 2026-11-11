@@ -22,6 +22,12 @@ Upload a `.gridset` or a `.grid3user` file, then:
 
 Everything runs client-side. Files never leave the browser.
 
+## Cell changer
+
+For bulk-editing cell commands, see the separate
+[Gridset Cell Changer repository](https://github.com/simonjudge/gridset-cell-changer).
+It supports `.gridset` and `.grid3user` files and runs locally in the browser.
+
 ## Optional style consolidation
 
 Before editing appearance, open [the guided style consolidator](consolidate_stlyes.html).
