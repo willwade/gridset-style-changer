@@ -1,0 +1,444 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Colour regression tests</title>
+</head>
+<body>
+  <h1>Colour regression tests</h1>
+  <pre id="results">Running...</pre>
+  <iframe id="app" title="Style editor test fixture" style="width: 1100px; height: 800px;"></iframe>
+  <script type="module">
+    import {
+      parseColour, rgbaToHex, rgbToCss, compositeOver, contrastRatio,
+      adjustForContrast, styleBackgroundRgb, styleContrastInfo,
+      parseXml, styleAppearance,
+    } from '../js/gridset.js';
+
+    const results = document.getElementById('results');
+    const passed = [];
+    function assert(condition, message) {
+      if (!condition) throw new Error(message);
+    }
+    function equal(actual, expected, message) {
+      assert(JSON.stringify(actual) === JSON.stringify(expected),
+        `${message}: expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`);
+    }
+    async function test(name, run) {
+      await run();
+      passed.push(name);
+      results.textContent = passed.map((name) => `PASS ${name}`).join('\n');
+    }
+    const serialize = (colour) => rgbaToHex(colour.r, colour.g, colour.b, colour.a);
+
+    try {
+      await test('Grid 3 RGB and trailing alpha are read and written with AAC-processors', () => {
+        equal(parseColour('#FF0000FF'), { r: 255, g: 0, b: 0, a: 1 }, 'Opaque red');
+        equal(parseColour('#000000FF'), { r: 0, g: 0, b: 0, a: 1 }, 'Opaque black');
+        equal(parseColour('#112233'), { r: 17, g: 34, b: 51, a: 1 }, 'Six-digit RGB');
+        equal(parseColour('not-a-colour'), null, 'Invalid colour');
+        equal(parseColour('rgb(broken, broken, broken)'), null, 'Malformed CSS cannot become black');
+        for (const hex of ['#FF000000', '#00FF0080', '#0000FFFF', '#123456AB']) {
+          equal(serialize(parseColour(hex)), hex, 'RGBA round-trip');
+        }
+        equal(rgbToCss(parseColour('#12345680')), '#123456', 'RGB swatch');
+      });
+
+      await test('Contrast uses composited text, tile, background and white canvas', () => {
+        equal(styleBackgroundRgb({ TileColour: '#00000000', BackColour: '#FF0000FF' }),
+          { r: 255, g: 0, b: 0 }, 'Transparent tile reveals background');
+        equal(styleBackgroundRgb({ TileColour: '#00000080', BackColour: '#FFFFFF80' }),
+          { r: 127, g: 127, b: 127 }, 'Translucent layers');
+        equal(compositeOver(parseColour('#FF000000'), { r: 0, g: 0, b: 255 }),
+          { r: 0, g: 0, b: 255 }, 'Transparent foreground');
+        equal(styleContrastInfo({ FontColour: '#00000000', TileColour: '#FFFFFFFF' }).ratio,
+          1, 'Invisible text contrast');
+        equal(styleContrastInfo({ FontColour: '#000000FF', TileColour: '#FFFFFFFF' }).ratio,
+          21, 'Opaque black and white');
+      });
+
+      await test('Automatic contrast reaches measured targets or returns the best possible text', () => {
+        for (let level = 0; level <= 255; level++) {
+          const bg = { r: level, g: level, b: level };
+          for (const target of [4.5, 7]) {
+            const fixed = adjustForContrast(bg, bg, target);
+            const best = Math.max(contrastRatio({ r: 0, g: 0, b: 0 }, bg),
+              contrastRatio({ r: 255, g: 255, b: 255 }, bg));
+            assert(contrastRatio(fixed, bg) >= Math.min(target, best),
+              `Contrast failed for grey ${level} and target ${target}`);
+          }
+        }
+        const black = { r: 0, g: 0, b: 0 };
+        equal(adjustForContrast(black, { r: 255, g: 255, b: 255 }, 7), black,
+          'Already-compliant text unchanged');
+        for (const bg of [
+          { r: 255, g: 0, b: 0 }, { r: 0, g: 255, b: 0 }, { r: 0, g: 0, b: 255 },
+          { r: 20, g: 130, b: 215 }, { r: 240, g: 220, b: 45 },
+        ]) {
+          assert(contrastRatio(adjustForContrast(bg, bg, 4.5), bg) >= 4.5,
+            'AA contrast on coloured background');
+        }
+      });
+
+      const frame = document.getElementById('app');
+      const ready = new Promise((resolve) => frame.addEventListener('load', resolve, { once: true }));
+      frame.src = '../index.html';
+      await ready;
+      const app = frame.contentWindow;
+      const doc = frame.contentDocument;
+      const startupDeadline = Date.now() + 10000;
+      while (!app.__gs && Date.now() < startupDeadline) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      assert(app.__gs && app.JSZip, 'App or CDN dependencies failed to load');
+      const zip = new app.JSZip();
+      zip.file('Settings0/Styles/styles.xml', '<Styles><Style Key="Test">' +
+        '<BackColour>#FFFFFFFF</BackColour><TileColour>#FF0000FF</TileColour>' +
+        '<BorderColour>#0000FF80</BorderColour><FontColour>#FFFFFF80</FontColour>' +
+        '</Style></Styles>');
+      zip.file('Grids/Main/grid.xml', '<Grid><Style><TileColour>#FF0000FF</TileColour>' +
+        '<FontColour>#00000000</FontColour></Style></Grid>');
+      const data = new app.DataTransfer();
+      data.items.add(new app.File([await zip.generateAsync({ type: 'uint8array' })], 'test.gridset'));
+      doc.getElementById('file-input').files = data.files;
+      doc.getElementById('file-input').dispatchEvent(new app.Event('change'));
+      const deadline = Date.now() + 10000;
+      while (doc.getElementById('editor-section').hidden && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      assert(!doc.getElementById('editor-section').hidden, 'Fixture failed to open');
+      const control = (prop) => doc.querySelector(`#style-cards .colour-control[data-property="${prop}"]`);
+      const commonSize = () => doc.querySelector('#common-style .prop-row > input[type="number"]');
+      const commonFont = () => doc.querySelector('#common-style .font-control select');
+      const applyCommon = () => doc.querySelector('[data-action="apply-common-style"]').click();
+      const commonColour = (prop) => doc.querySelector(`#common-style .colour-control[data-property="${prop}"]`);
+      const value = (prop) => app.__gs.state.stylesDoc.querySelector(prop).textContent;
+      const change = (element, value, event = 'change') => {
+        element.value = value;
+        element.dispatchEvent(new app.Event(event, { bubbles: true }));
+      };
+
+      await test('Matrix replaces spectrum pickers and displays trailing alpha correctly', () => {
+        equal(doc.querySelectorAll('input[type="color"]').length, 0, 'No spectrum pickers');
+        assert(!control('TileColour').querySelector('.hex'), 'No hex input');
+        assert(control('TileColour').querySelector('summary').title.includes('#FF0000FF'), 'Colour tooltip');
+        equal(doc.querySelector('.preview-tile').style.backgroundColor, 'rgb(255, 0, 0)', 'Red preview');
+        equal(control('BorderColour').querySelector('input[type="number"]').value, '50', 'Transparency percentage');
+        equal(control('TileColour').querySelectorAll('.colour-swatch').length, 40, 'Matrix size');
+        const palette = control('TileColour').querySelector('details');
+        palette.querySelector('summary').click();
+        assert(palette.open, 'Colour matrix opens');
+        palette.querySelector('summary').click();
+        assert(!palette.open, 'Colour matrix closes');
+      });
+
+      await test('Swatches preserve alpha, transparency updates XML, invalid input is explicit', () => {
+        const palette = control('BorderColour').querySelector('details');
+        palette.open = true;
+        control('BorderColour').querySelector('[data-colour="#F44336"]').click();
+        assert(!palette.open, 'Choosing an individual colour closes its palette');
+        equal(value('BorderColour'), '#F4433680', 'Swatch preserves exact alpha byte');
+        change(control('BorderColour').querySelector('input[type="number"]'), '100', 'input');
+        equal(value('BorderColour'), '#F4433600', 'Fully transparent');
+        palette.open = true;
+        control('BorderColour').querySelector('[data-colour="#0D47A1"]').click();
+        equal(value('BorderColour'), '#0D47A100', 'Colour can change while fully transparent');
+        equal(control('BorderColour').querySelector('.colour-sample > span').style.backgroundColor,
+          'rgb(13, 71, 161)', 'Swatch shows selected RGB even when transparent');
+        control('BorderColour').querySelector('[data-colour="#F44336"]').click();
+        change(control('BorderColour').querySelector('input[type="number"]'), '0', 'input');
+        equal(value('BorderColour'), '#F44336FF', 'Fully opaque');
+        change(control('BorderColour').querySelector('input[type="number"]'), '101', 'input');
+        equal(value('BorderColour'), '#F44336FF', 'Out-of-range transparency does not mutate XML');
+        change(control('BorderColour').querySelector('input[type="number"]'), '0', 'input');
+        app.__gs.state.stylesDoc.querySelector('BorderColour').textContent = '#123456AB';
+        equal(value('BorderColour'), '#123456AB', 'Custom colour retains exact alpha');
+      });
+
+      await test('Black-on-white and white-on-black write opaque RGBA for named and inline styles', () => {
+        for (const mode of ['bw', 'wb']) {
+          change(doc.getElementById('contrast-mode'), mode);
+          doc.querySelector('[data-action="fix-contrast"]').click();
+          equal(value('FontColour'), mode === 'bw' ? '#000000FF' : '#FFFFFFFF', 'Text encoding');
+          equal(value('TileColour'), mode === 'bw' ? '#FFFFFFFF' : '#000000FF', 'Tile encoding');
+          equal(value('BackColour'), value('TileColour'), 'Named background encoding');
+          const defaultStyle = app.__gs.state.stylesDoc.querySelector('Style[Key="Default"]');
+          equal(defaultStyle.querySelector('BackColour')?.textContent, value('TileColour'),
+            'Initially empty Default receives explicit background');
+          for (const grid of app.__gs.state.gridDocs.values()) {
+            equal(grid.querySelector('FontColour').textContent, value('FontColour'), 'Inline text');
+            equal(grid.querySelector('TileColour').textContent, value('TileColour'), 'Inline tile');
+            equal(grid.querySelector('BackColour')?.textContent, value('TileColour'),
+              'Inline background added even when absent');
+          }
+          assert(doc.querySelector('.badge').textContent.includes('21.00'), 'Contrast badge 21:1');
+        }
+      });
+
+      await test('Automatic contrast reports unattainable AAA, fixes transparent text, and exports RGBA', async () => {
+        app.__gs.state.stylesDoc.querySelector('TileColour').textContent = '#777777FF';
+        app.__gs.state.stylesDoc.querySelector('FontColour').textContent = '#00000000';
+        change(doc.getElementById('contrast-mode'), 'auto');
+        change(doc.getElementById('contrast-target'), '7');
+        doc.querySelector('[data-action="fix-contrast"]').click();
+        assert(doc.getElementById('fix-result').textContent.includes('cannot reach 7:1'),
+          'Unattainable target reported');
+        assert(doc.getElementById('fix-result').classList.contains('fix-result-warning'), 'Warning styling');
+        equal(value('FontColour'), '#000000FF', 'Best opaque text');
+        change(doc.getElementById('contrast-target'), '4.5');
+        doc.querySelector('[data-action="fix-contrast"]').click();
+        assert(!doc.getElementById('fix-result').textContent.includes('cannot reach'), 'AA is attainable');
+        const exported = await app.JSZip.loadAsync(await app.__gs.buildModifiedBlob());
+        const xml = await exported.file('Settings0/Styles/styles.xml').async('string');
+        assert(xml.includes('<FontColour>#000000FF</FontColour>'), 'Export uses trailing alpha');
+        assert(xml.includes('<BorderColour>#123456AB</BorderColour>'), 'Unrelated alpha preserved');
+      });
+
+      await test('User-file contrast respects bulk selection and colour edits affect only the dropdown gridset', async () => {
+        const user = new app.JSZip();
+        for (const name of ['One', 'Two']) {
+          user.file(`${name}/Settings0/Styles/styles.xml`,
+            '<Styles><Style Key="Test"><TileColour>#FF0000FF</TileColour>' +
+            '<FontColour>#FFFFFF80</FontColour></Style></Styles>');
+          user.file(`${name}/Grids/Main/grid.xml`,
+            '<Grid><Style><BorderColour>#0000FF80</BorderColour></Style></Grid>');
+        }
+        user.file('settings.xml', '<User/>');
+        const transfer = new app.DataTransfer();
+        transfer.items.add(new app.File([await user.generateAsync({ type: 'uint8array' })], 'test.grid3user'));
+        const input = doc.getElementById('file-input');
+        input.files = transfer.files;
+        input.dispatchEvent(new app.Event('change'));
+        const deadline = Date.now() + 10000;
+        while (doc.querySelectorAll('.gridset-target input').length !== 2 && Date.now() < deadline) {
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+        equal(doc.querySelectorAll('.gridset-target input').length, 2, 'Two gridsets loaded');
+        doc.querySelectorAll('.gridset-target input')[1].click();
+        change(doc.getElementById('contrast-mode'), 'bw');
+        doc.querySelector('[data-action="fix-contrast"]').click();
+        equal(app.__gs.state.contexts[0].stylesDoc.querySelector('FontColour').textContent,
+          '#000000FF', 'Checked gridset gets contrast fix');
+        equal(app.__gs.state.contexts[1].stylesDoc.querySelector('FontColour').textContent,
+          '#FFFFFF80', 'Unchecked gridset unchanged');
+        change(doc.getElementById('gridset-editor'), app.__gs.state.contexts[1].id);
+        control('FontColour').querySelector('[data-colour="#0D47A1"]').click();
+        equal(value('FontColour'), '#0D47A180', 'Dropdown gridset receives colour and keeps alpha');
+        equal(app.__gs.state.contexts[0].stylesDoc.querySelector('FontColour').textContent,
+          '#000000FF', 'Individual colour edit does not propagate');
+        const exported = await app.JSZip.loadAsync(await app.__gs.buildModifiedUserBlob());
+        assert((await exported.file('Two/Settings0/Styles/styles.xml').async('string'))
+          .includes('<FontColour>#0D47A180</FontColour>'), 'User-file export retains RGBA');
+        equal(await exported.file('settings.xml').async('string'), '<User/>', 'User settings preserved');
+      });
+      await test('Default checkbox excludes, includes and creates defaults in selected gridsets only', async () => {
+        const contexts = app.__gs.state.contexts;
+        const defaults = (context) => [...context.stylesDoc.querySelectorAll('Style')]
+          .filter((style) => style.getAttribute('Key')?.toLowerCase() === 'default');
+        const defaultStyle = defaults(contexts[0])[0];
+        assert(defaultStyle, 'Contrast creates missing selected Default');
+        equal(defaults(contexts[1]).length, 0, 'Unchecked gridset has no added Default');
+        const before = new app.XMLSerializer().serializeToString(defaultStyle);
+        doc.getElementById('include-default').checked = false;
+        change(commonSize(), '31');
+        applyCommon();
+        equal(new app.XMLSerializer().serializeToString(defaultStyle), before,
+          'Default unchanged when excluded');
+        doc.getElementById('include-default').checked = true;
+        change(commonSize(), '31');
+        applyCommon();
+        equal(defaultStyle.querySelector('FontSize').textContent, '31', 'Default size included');
+        change(commonFont(), 'Verdana');
+        applyCommon();
+        equal(defaultStyle.querySelector('FontName').textContent, 'Verdana', 'Default family included');
+        change(doc.getElementById('bump-delta'), '2');
+        doc.querySelector('[data-action="bump-size"]').click();
+        equal(defaultStyle.querySelector('FontSize').textContent, '33', 'Default bumped once');
+
+        doc.querySelectorAll('.gridset-target input')[1].click();
+        doc.querySelectorAll('.gridset-target input')[0].click();
+        change(doc.getElementById('contrast-mode'), 'auto');
+        doc.querySelector('[data-action="fix-contrast"]').click();
+        const added = defaults(contexts[1])[0];
+        equal(added.querySelector('FontColour').textContent, '#000000FF', 'Implicit black made explicit');
+        equal(added.querySelector('BackColour').textContent, '#FFFFFFFF', 'Implicit white made explicit');
+        equal(defaults(contexts[1]).length, 1, 'Default created exactly once');
+        const output = await app.JSZip.loadAsync(await app.__gs.buildModifiedUserBlob());
+        const xml = await output.file('Two/Settings0/Styles/styles.xml').async('string');
+        assert(xml.includes('Key="Default"') && xml.includes('<BackColour>#FFFFFFFF</BackColour>'),
+          'Default saved in gridset styles.xml within user archive');
+      });
+      await test('Common tile edits respect scope, preserve other fields, and refresh after fixes', async () => {
+        const contexts = app.__gs.state.contexts;
+        const allStyles = (context) => [
+          ...context.stylesDoc.querySelectorAll('Style'),
+          ...[...context.gridDocs.values()].flatMap((grid) => [...grid.querySelectorAll('Style')]),
+        ];
+        const before = new app.XMLSerializer().serializeToString(contexts[0].stylesDoc);
+        const selectedBefore = new app.XMLSerializer().serializeToString(contexts[1].stylesDoc);
+        const changedBefore = app.__gs.state.changedStyles.size;
+        change(commonSize(), '28');
+        equal(new app.XMLSerializer().serializeToString(contexts[1].stylesDoc), selectedBefore,
+          'Draft does not mutate selected styles before Apply');
+        equal(app.__gs.state.changedStyles.size, changedBefore, 'Draft does not mark changes');
+        applyCommon();
+        equal(new app.XMLSerializer().serializeToString(contexts[0].stylesDoc), before,
+          'Unchecked gridset unchanged by tile');
+        assert(allStyles(contexts[1]).every((style) => style.querySelector('FontSize').textContent === '28'),
+          'Tile updates named, Default and inline styles in checked gridset');
+        equal(commonSize().value, '28', 'Common size shows uniform value');
+        change(doc.getElementById('bump-delta'), '2');
+        doc.querySelector('[data-action="bump-size"]').click();
+        equal(commonSize().value, '30', 'Font bump refreshes common tile');
+        doc.querySelectorAll('.gridset-target input')[0].click();
+        equal(commonSize().value, '', 'Mixed font sizes display blank');
+        change(doc.getElementById('gridset-editor'), contexts[0].id);
+        change(commonFont(), 'Georgia');
+        applyCommon();
+        assert(contexts.every((context) => allStyles(context).every((style) =>
+          style.querySelector('FontName').textContent === 'Georgia')), 'Font applies across checked gridsets');
+        const borders = contexts.flatMap(allStyles).map((style) => style.querySelector('BorderColour')?.textContent);
+        commonColour('BorderColour').querySelector('details').open = true;
+        commonColour('BorderColour').querySelector('[data-colour="#F44336"]').click();
+        assert(!commonColour('BorderColour').querySelector('details').open, 'Common colour choice closes palette');
+        assert(commonColour('BorderColour').querySelector('summary').title.includes('#F44336'),
+          'Common draft displays selected colour');
+        applyCommon();
+        assert(commonColour('BorderColour').querySelector('summary').title.includes('#F44336'),
+          'Applied RGB stays shown with mixed transparency');
+        equal(commonColour('BorderColour').querySelector('input').value, '',
+          'Mixed transparency remains blank without hiding shared RGB');
+        contexts.flatMap(allStyles).forEach((style, index) => {
+          const colour = parseColour(style.querySelector('BorderColour').textContent);
+          equal(colour.a, parseColour(borders[index])?.a ?? 1, 'Swatch preserves each alpha');
+          equal(rgbToCss(colour), '#F44336', 'Swatch sets RGB everywhere');
+        });
+        change(commonColour('BorderColour').querySelector('input'), '50', 'input');
+        applyCommon();
+        equal(commonColour('BorderColour').querySelector('input').value, '50',
+          'Applied transparency stays set');
+        assert(contexts.flatMap(allStyles).every((style) =>
+          style.querySelector('BorderColour').textContent === '#F4433680'), 'Percentage sets alpha everywhere');
+        commonColour('BorderColour').querySelector('[data-colour="#0D47A1"]').click();
+        change(commonColour('BorderColour').querySelector('input'), '25', 'input');
+        change(commonFont(), 'Tahoma');
+        equal(contexts[0].stylesDoc.querySelector('BorderColour').textContent, '#F4433680',
+          'Combined colour and transparency edits remain staged');
+        doc.querySelectorAll('.gridset-target input')[0].click();
+        equal(commonFont().value, 'Tahoma', 'Pending edits survive scope changes');
+        applyCommon();
+        equal(contexts[0].stylesDoc.querySelector('BorderColour').textContent, '#F4433680',
+          'Apply uses current scope, not scope when edited');
+        assert(allStyles(contexts[1]).every((style) =>
+          style.querySelector('BorderColour').textContent === '#0D47A1BF' &&
+          style.querySelector('FontName').textContent === 'Tahoma'),
+          'Apply commits multiple fields including RGB and alpha together');
+        doc.querySelectorAll('.gridset-target input')[0].click();
+        commonColour('FontColour').querySelector('[data-colour="#F44336"]').click();
+        change(doc.getElementById('contrast-mode'), 'wb');
+        doc.querySelector('[data-action="fix-contrast"]').click();
+        assert(commonColour('BackColour').querySelector('summary').title.includes('#000000FF'),
+          'Contrast refreshes common background');
+        assert(commonColour('FontColour').querySelector('summary').title.includes('#FFFFFFFF'),
+          'Contrast refreshes common text');
+        assert(doc.querySelector('[data-action="apply-common-style"]').disabled,
+          'Contrast replaces pending colour edit without leaving stale changes to apply');
+        doc.getElementById('include-inline').click();
+        const inline = [...contexts[0].gridDocs.values()][0].querySelector('Style');
+        const previousInline = new app.XMLSerializer().serializeToString(inline);
+        change(commonSize(), '40');
+        applyCommon();
+        equal(new app.XMLSerializer().serializeToString(inline), previousInline,
+          'Excluded inline styles unchanged');
+        const exported = await app.JSZip.loadAsync(await app.__gs.buildModifiedUserBlob());
+        assert((await exported.file('Two/Settings0/Styles/styles.xml').async('string'))
+          .includes('<FontSize>40</FontSize>'), 'Common tile changes persist in export');
+        doc.getElementById('include-inline').click();
+      });
+      await test('Cell contrast resolves inherited colours, grid canvases and unknown backgrounds', () => {
+        const styles = parseXml('<StyleData><Styles><Style Key="Default">' +
+          '<BackColour>#FFFFFFFF</BackColour><FontColour>#000000FF</FontColour></Style>' +
+          '<Style Key="Dark"><BackColour>#000000FF</BackColour><FontColour>#FFFFFFFF</FontColour></Style>' +
+          '</Styles></StyleData>');
+        const grid = parseXml('<Grid><BackgroundColour>#000000FF</BackgroundColour>' +
+          '<Cells><Style><BasedOnStyle>Dark</BasedOnStyle></Style>' +
+          '<Style><BasedOnStyle>Default</BasedOnStyle><BackColour>#FFFFFF00</BackColour></Style>' +
+          '</Cells></Grid>');
+        const cells = grid.querySelectorAll('Style');
+        const inherited = styleAppearance(cells[0], styles, grid);
+        equal(inherited.props.FontColour, '#FFFFFFFF', 'Inherited font');
+        equal(inherited.bg, { r: 0, g: 0, b: 0 }, 'Inherited opaque background');
+        assert(inherited.backgroundKnown, 'Opaque background known');
+        const transparent = styleAppearance(cells[1], styles, grid);
+        equal(transparent.bg, { r: 0, g: 0, b: 0 }, 'Transparent override reveals grid, not Default white');
+        assert(transparent.backgroundKnown, 'Solid grid background known');
+        grid.documentElement.removeChild(grid.querySelector('BackgroundColour'));
+        assert(!styleAppearance(cells[1], styles, grid).backgroundKnown, 'Missing canvas is unknown');
+        const image = grid.createElement('BackgroundStyle');
+        image.textContent = 'Image';
+        grid.documentElement.appendChild(image);
+        const colour = grid.createElement('BackgroundColour');
+        colour.textContent = '#000000FF';
+        grid.documentElement.appendChild(colour);
+        assert(!styleAppearance(cells[1], styles, grid).backgroundKnown, 'Image overrides canvas colour');
+      });
+      await test('Fixing Default cannot introduce inherited tile colours into already-compliant cells', async () => {
+        const zip = new app.JSZip();
+        zip.file('Settings0/Styles/styles.xml', '<StyleData><Styles><Style Key="Default"/>' +
+          '</Styles></StyleData>');
+        zip.file('Grids/Main/grid.xml', '<Grid><Cells><Style><BasedOnStyle>Default</BasedOnStyle>' +
+          '<BackColour>#000000FF</BackColour><FontColour>#FFFFFFFF</FontColour>' +
+          '</Style></Cells></Grid>');
+        const data = new app.DataTransfer();
+        data.items.add(new app.File([await zip.generateAsync({ type: 'uint8array' })], 'inheritance.gridset'));
+        const input = doc.getElementById('file-input');
+        input.files = data.files;
+        input.dispatchEvent(new app.Event('change'));
+        const deadline = Date.now() + 10000;
+        while (app.__gs.state.fileName !== 'inheritance.gridset' ||
+            app.__gs.state.contexts.length === 0) {
+          assert(Date.now() < deadline, 'Inheritance fixture load timed out');
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+        change(doc.getElementById('contrast-mode'), 'auto');
+        doc.querySelector('[data-action="fix-contrast"]').click();
+        const context = app.__gs.state.activeContext;
+        const grid = [...context.gridDocs.values()][0];
+        const appearance = styleAppearance(grid.querySelector('Style'), context.stylesDoc, grid);
+        equal(appearance.bg, { r: 0, g: 0, b: 0 }, 'Black cell stays black after Default fix');
+        assert(contrastRatio(compositeOver(parseColour(appearance.props.FontColour), appearance.bg),
+          appearance.bg) >= 4.5, 'Final effective contrast passes');
+      });
+      await test('Font dropdowns offer all fonts and preserve custom font editing', () => {
+        const bulk = commonFont();
+        assert(bulk.tagName === 'SELECT' && bulk.options.length > 8, 'Bulk uses full font dropdown');
+        const individual = doc.querySelector('#style-cards .font-control select');
+        assert(individual.options.length > 8, 'Style uses full font dropdown');
+        change(individual, 'Verdana');
+        equal(value('FontName'), 'Verdana', 'Dropdown applies individual font');
+        change(individual, '__custom__');
+        const custom = doc.querySelector('#style-cards .font-control input');
+        assert(!custom.hidden, 'Custom input available');
+        change(custom, 'My Custom Font');
+        equal(value('FontName'), 'My Custom Font', 'Custom font applies');
+        change(commonFont(), '__custom__');
+        change(commonFont().parentElement.querySelector('input'), 'Another Custom Font');
+        equal(value('FontName'), 'My Custom Font', 'Custom font remains staged until Apply');
+        applyCommon();
+        equal(value('FontName'), 'Another Custom Font', 'Bulk custom font applies');
+        equal(doc.querySelector('#style-cards .font-control select').value,
+          'Another Custom Font', 'Existing custom font remains selected after rendering');
+        const colour = control('FontColour');
+        assert(colour.querySelector('input').title.includes('100%'), 'Transparency tooltip explains range');
+        assert(colour.textContent.trim() === '%', 'No transparency caption or hex field');
+      });
+      document.body.dataset.result = 'passed';
+      results.textContent += `\n\n${passed.length} tests passed.`;
+    } catch (error) {
+      document.body.dataset.result = 'failed';
+      results.textContent += `\nFAIL ${error.stack || error}`;
+      console.error(error);
+    }
+  </script>
+</body>
+</html>
